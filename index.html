@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101820">
+  <title>墨格对决 · 卡牌占地</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="rules.js" defer></script>
+  <script src="setup.js" defer></script>
+  <script src="game.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="frame topbar-inner">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></div>
+        <h1>墨格对决</h1>
+        <span class="brand-note">卡牌占地</span>
+      </div>
+      <div class="topbar-actions">
+        <span class="difficulty-tag" id="trial-label" hidden>试玩</span>
+        <button class="button quiet" id="show-rules" type="button"><span class="help-icon" aria-hidden="true">?</span>玩法</button>
+        <button class="button quiet" id="open-setup" type="button" hidden><span aria-hidden="true">▦</span>备战</button>
+        <button class="button quiet" id="trial-replay" type="button" hidden>重开</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="frame setup-view" id="setup-view">
+    <div class="setup-heading">
+      <div>
+        <h2 id="setup-title" tabindex="-1">准备对战</h2>
+        <p>1 对 1 卡牌占地，每局 12 回合。</p>
+      </div>
+      <div class="progress-card">
+        <span class="progress-icon" aria-hidden="true">✦</span>
+        <div><p class="win-total">累计 <strong id="win-count">0</strong> 胜</p><p id="next-unlock"></p></div>
+      </div>
+    </div>
+
+    <div class="setup-grid">
+      <section class="panel map-panel" aria-labelledby="map-title">
+        <div class="panel-heading"><h3 id="map-title">选择地图</h3><span id="map-count" class="deck-count"></span></div>
+        <div class="map-options" id="map-options"></div>
+        <p class="selection-note" id="map-description" aria-live="polite"></p>
+      </section>
+
+      <section class="panel setup-settings" aria-labelledby="settings-title">
+        <div class="panel-heading"><h3 id="settings-title">对局设置</h3></div>
+        <div class="setup-group">
+          <h4 id="difficulty-title">电脑难度</h4>
+          <div class="difficulty-options" id="difficulty-options" role="group" aria-labelledby="difficulty-title"></div>
+          <p class="selection-note" id="difficulty-description" aria-live="polite"></p>
+        </div>
+        <div class="setup-group">
+          <h4 id="deck-mode-title">出战牌组</h4>
+          <div class="deck-options" role="group" aria-labelledby="deck-mode-title">
+            <button class="button deck-choice" id="starter-deck" aria-pressed="true" type="button"><strong>新手牌组</strong><span>预设 15 张</span></button>
+            <button class="button deck-choice" id="custom-deck" aria-pressed="false" aria-haspopup="dialog" type="button"><strong>自定义牌组</strong><span id="custom-deck-note">从卡库选 15 张</span></button>
+          </div>
+        </div>
+        <div class="setup-actions">
+          <button class="button quiet" id="resume-match" type="button" hidden>返回对局</button>
+          <button class="button primary" id="start-match" type="button"><span>开始对局</span><span class="submit-arrow" aria-hidden="true">→</span></button>
+        </div>
+      </section>
+    </div>
+    <p class="selection-note" id="storage-note" hidden>本地存储不可用，本次会话内会保留进度。</p>
+  </main>
+
+  <main class="frame game" id="battle-view" hidden>
+    <section class="scoreboard" aria-label="对战比分">
+      <div class="score-row">
+        <div class="team player">
+          <div class="team-label"><i class="team-marker" aria-hidden="true"></i>玩家</div>
+          <div class="team-count"><strong id="player-score">01</strong><span>格</span></div>
+          <div class="team-sp" id="player-sp"><i class="legend-core" aria-hidden="true"></i><strong>0</strong> SP</div>
+        </div>
+
+        <div class="round">
+          <span class="round-label" id="round-label">回合</span>
+          <div><strong id="round-number">01</strong><span class="round-total"> / 12</span></div>
+          <div class="round-track" id="round-track" aria-hidden="true"></div>
+        </div>
+
+        <div class="team cpu">
+          <div class="team-label"><i class="team-marker" aria-hidden="true"></i>电脑<span class="difficulty-tag" id="battle-difficulty"></span></div>
+          <div class="team-count"><strong id="cpu-score">01</strong><span>格</span></div>
+          <div class="team-sp" id="cpu-sp"><i class="legend-core" aria-hidden="true"></i><strong>0</strong> SP</div>
+        </div>
+      </div>
+      <div class="turf-bar" id="turf-bar" role="img" aria-label="双方占地比例"><i></i><i></i></div>
+    </section>
+
+    <div class="playfield">
+      <section class="panel board-panel" aria-labelledby="board-title">
+        <div class="panel-heading">
+          <h2 id="board-title">练习场</h2>
+          <span class="phase" id="phase"><i aria-hidden="true"></i><span>选择落点</span></span>
+        </div>
+
+        <div class="arena">
+          <div class="board-columns" id="board-columns" aria-hidden="true"></div>
+          <div class="board-rows" id="board-rows" aria-hidden="true"></div>
+          <div class="board" id="board" tabindex="0" role="group" aria-label="占地棋盘" aria-describedby="placement-status"></div>
+        </div>
+
+        <div class="board-legend" aria-label="棋盘图例">
+          <span><i class="legend-core" aria-hidden="true"></i>特殊格</span>
+          <span><i class="legend-charged" aria-hidden="true"></i>已充能</span>
+          <span><i class="legend-wall" aria-hidden="true"></i>地形封锁</span>
+          <span><i class="legend-clash" aria-hidden="true"></i>撞格封锁</span>
+          <span id="bridge-legend" title="占领后可作特攻起点" hidden><i class="legend-bridge" aria-hidden="true"></i>桥格</span>
+        </div>
+
+        <div class="turn-log" aria-live="polite" id="turn-log">落牌后，双方会一起揭晓。</div>
+      </section>
+
+      <section class="panel hand-panel" aria-labelledby="hand-title">
+        <div class="panel-heading">
+          <h2 id="hand-title">手牌</h2>
+          <div class="hand-deck">
+            <span class="deck-count">牌库剩 <strong id="deck-count">11</strong> 张</span>
+            <div class="next-draw" id="next-draw" hidden>
+              <span class="next-draw-label">下张补牌</span>
+              <span class="mini-shape" id="next-draw-shape" aria-hidden="true"></span>
+              <strong id="next-draw-name"></strong>
+            </div>
+          </div>
+        </div>
+        <div class="hand" id="hand" aria-label="你的手牌"></div>
+
+        <div class="placement-controls">
+          <button class="button control" id="rotate" type="button"><span class="arrow-icon" aria-hidden="true">↻</span><span>旋转</span><kbd>R</kbd></button>
+          <button class="button control special-control" id="special" type="button" aria-pressed="false" aria-describedby="special-hint"><i class="legend-core" aria-hidden="true"></i><span>特殊攻击</span><kbd>E</kbd></button>
+        </div>
+
+        <div class="special-hint-space">
+          <p class="special-hint" id="special-hint" role="status" hidden></p>
+        </div>
+        <p class="placement-status" id="placement-status" role="status"></p>
+
+        <div class="submit-controls">
+          <button class="button discard" id="pass" type="button">弃牌 <span>+1 SP</span></button>
+          <button class="button primary" id="submit" type="button"><span>确认落子</span><span class="submit-arrow" aria-hidden="true">→</span></button>
+        </div>
+
+        <p class="input-hint"><kbd>1</kbd>–<kbd>4</kbd> 选牌 <span>·</span> 方向键移位 <span>·</span> <kbd>Enter</kbd> 确认</p>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="rules-dialog" class="dialog" aria-labelledby="rules-title">
+    <div class="dialog-header">
+      <h2 id="rules-title">怎么玩</h2>
+      <form method="dialog"><button class="button icon-button" aria-label="关闭玩法" type="submit">×</button></form>
+    </div>
+    <ol class="rule-list">
+      <li><strong>选牌铺墨</strong><p>从 4 张手牌中选一张，可旋转 90°。普通落子只能盖空格，且至少一格要贴到自己的地盘，斜角也算。</p></li>
+      <li><strong>同时结算</strong><p>双方每回合各出一张。撞格时特殊格优先，其余由格数更少的卡牌抢到该格。同类格若格数相同，撞到的格子会被封锁。</p></li>
+      <li><strong>攒 SP，反涂对手</strong><p>特殊格周围 8 格填满时获得 1 SP，墙和棋盘边缘也算。弃牌跳过同样获得 1 SP。特殊攻击消耗 SP，紧贴己方特殊格落子，可覆盖普通墨格。<span id="rule-bridge">「窄桥」上，己方占领的蓝框桥格也可用作特攻起点。</span></p></li>
+      <li><strong>12 回合后比占格</strong><p><span id="rule-deck-setup">开局可用新手牌组，或从已拥有的卡牌中选 15 张。</span>牌库有牌时，用完一张就补一张。终局时占格数更多的一方获胜<span id="rule-rewards">，累计胜场可解锁新内容</span>。</p></li>
+    </ol>
+  </dialog>
+
+  <dialog id="deck-dialog" class="dialog deck-dialog" aria-labelledby="deck-dialog-title" aria-describedby="deck-instructions">
+    <div class="dialog-header">
+      <div>
+        <h2 id="deck-dialog-title">自定义牌组</h2>
+        <p id="deck-instructions">选 15 张不同的卡。点已选卡可移出，开局随机抽 4 张。</p>
+      </div>
+      <form method="dialog"><button class="button icon-button" aria-label="关闭牌组编辑" type="submit">×</button></form>
+    </div>
+    <div class="deck-catalog" id="deck-catalog" role="group" aria-label="卡库"></div>
+    <div class="deck-footer">
+      <div><p class="picked-count">已选 <strong id="picked-count"></strong></p><p id="deck-feedback" class="selection-note" role="status"></p></div>
+      <div class="deck-footer-actions">
+        <button class="button quiet" id="clear-deck" type="button">清空</button>
+        <button class="button primary" id="save-deck" type="button">使用此牌组</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="result-dialog" class="dialog result-dialog" aria-labelledby="result-title">
+    <p class="result-caption">12 回合已结束</p>
+    <h2 id="result-title"></h2>
+    <div class="result-scores">
+      <div class="result-player"><strong id="result-player"></strong><span>玩家占格</span></div>
+      <span class="result-separator" aria-hidden="true">/</span>
+      <div class="result-cpu"><strong id="result-cpu"></strong><span>电脑占格</span></div>
+    </div>
+    <div class="result-unlocks" id="result-unlocks" hidden>
+      <h3>本局解锁</h3>
+      <ul id="reward-list"></ul>
+    </div>
+    <div class="result-actions">
+      <form method="dialog"><button type="submit" class="button discard">查看棋盘</button></form>
+      <button type="button" class="button quiet" id="play-again">再来一局</button>
+      <button type="button" class="button primary" id="result-setup">回到备战 <span aria-hidden="true">→</span></button>
+    </div>
+  </dialog>
+
+  <div class="action-toast" id="action-toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+
+  <noscript><p class="frame">请启用 JavaScript 后开始对战。</p></noscript>
+</body>
+</html>
