@@ -403,24 +403,24 @@ button:focus-visible, .board:focus-visible {
   pointer-events: none;
 }
 
-/* Attack focus (design 5.2): while aiming a special attack every non-core
-   tile dims so flip/anchor overlays stay readable. Direct overrides instead
-   of filter — pseudo-element overlays (× marks, bridge squares) must stay
-   crisp. Cores keep their colors as the attack anchors. */
-#board.attack-focus .tile:not(.core):not(.preview) {
-  background: #1c262e;
-  box-shadow: inset 0 1px #2a353d, inset 0 -1px #19222a;
-  color: #44545e;
+/* Attack focus (design 5.2, v1.3.1): while aiming a special attack the
+   non-special tiles get a translucent dimming overlay instead of a
+   background swap — original ink/texture/×/bridge content stays visible
+   underneath, just darkened. Cores, the attack .preview and the atk-*
+   overlay tiles keep full brightness as the anchors. The overlay uses
+   ::before, which only .preview (dashed frame, excluded) and .atk-origin
+   (gold corner frame, excluded) occupy among affected tiles; the flip/
+   neutral/blocked overlays draw on ::after and are excluded by class.
+   pointer-events none, removed instantly with the class. */
+#board.attack-focus .tile:not(.core):not(.preview):not(.atk-origin):not(.atk-flip):not(.atk-neutral):not(.atk-blocked):not(.atk-anchor)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: 3px;
+  background: #101820a6;
+  pointer-events: none;
 }
-#board.attack-focus .tile:not(.core):not(.preview):not(.wall):not(.clash)::after {
-  color: #5c6d77;
-}
-#board.attack-focus .tile.wall:not(.core),
-#board.attack-focus .tile.clash:not(.core) {
-  background: repeating-linear-gradient(135deg, #46545e 0 3px, #33404a 3px 7px);
-  box-shadow: inset 0 0 0 1.5px #5b6c76;
-}
-#board.attack-focus .tile.clash:not(.core)::after { background: #3a332b; color: #8a8274; }
 #board.attack-focus .tile[data-target] { outline-color: #ffe5a8; }
 #board.attack-focus .tile[data-target].invalid { outline-color: #f8bead; }
 
@@ -634,22 +634,47 @@ kbd { padding: 2px 4px; border-radius: 4px; border: 1px solid #4b5c67; color: #c
 #battle-view:not([hidden]) .card,
 #battle-view:not([hidden]) .board { touch-action: none; }
 .card.dragging { opacity: 0.55; box-shadow: 0 0 0 1.5px var(--teal); }
+/* v1.3.1: the ghost is a board-consistent footprint, not a card face —
+   auto-sized to the rotated shape, cells drawn at the live board's cell
+   size/gap (JS sets --ghost-cell/--ghost-row/--ghost-gap per drag). Half
+   transparent so the target tile shows through; no card shell or shadow. */
 #drag-ghost {
   position: fixed;
   z-index: 30;
-  width: 120px;
-  height: 118px;
-  padding: 8px;
-  transform: translate(-50%, -50%) scale(1.35);
-  border: 1.5px solid var(--teal);
-  border-radius: 11px;
-  background: linear-gradient(140deg, #2c3b47, #25333e);
-  box-shadow: 0 10px 26px #060d1366;
+  padding: 2px;
+  transform: translate(-50%, -50%);
   pointer-events: none;
 }
-#drag-ghost .card-top, #drag-ghost .card-bottom { display: none; }
-#drag-ghost .mini-shape { position: absolute; inset: 0; margin: auto; --chip: 17px; }
-#drag-ghost .long-shape { --chip: 12px; }
+#drag-ghost .ghost-shape {
+  display: grid;
+  grid-template-columns: repeat(var(--ghost-cols, 1), var(--ghost-cell, 24px));
+  grid-auto-rows: var(--ghost-row, 24px);
+  gap: var(--ghost-gap, 2px);
+  padding: 1px;
+  border: 1px solid #77efd2;
+  border-radius: 3px;
+  background: #69edc94d;
+  opacity: 0.85;
+}
+#drag-ghost .ghost-shape i {
+  border-radius: 3px;
+  background: #47c9ad;
+  box-shadow: inset 0 2px #72e7ce;
+}
+#drag-ghost .ghost-shape i.mini-core {
+  background: #217361;
+  box-shadow: inset 0 0 0 1px #4de6bd;
+}
+#drag-ghost .ghost-shape i.mini-core::after {
+  content: '';
+  display: block;
+  width: 46%;
+  aspect-ratio: 1;
+  margin: 27% auto;
+  background: #b3ffec;
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
 
 /* v1.3-A: action bar is the last item of the battle flex column — static
    position, no sticky, never covers the hand. Desktop default keeps the

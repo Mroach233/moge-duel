@@ -216,7 +216,6 @@
   // prefers-reduced-motion nothing is animated and no class is added.
   // =====================================================================
   const motionTimers = {};
-  let openingMotionPending = false; // opening deal waits for the mulligan answer
   let lastNextDrawKey = null; // next-draw flips only after a real card change
   // v1.3-B2: previous score/SP snapshot; null means "no baseline yet" so the
   // very first render of a match (or tutorial step) never bumps.
@@ -273,7 +272,6 @@
     // renderGame() before clearMotion(), so nulling here would erase the
     // opening baseline and mute the first settled turn. Explicit resets live
     // in startGame/showTutorialStep (before their own renderGame).
-    openingMotionPending = false;
   }
 
   // Opening deal: hand cards fly in from the deck corner, deck icon shuffles.
@@ -285,13 +283,11 @@
     if (deckInfo && !deckInfo.hidden) playMotionOnce(deckInfo, 'shuffling', 700);
   }
 
-  // The opening mulligan dialog delayed the deal; run it once the player
-  // answers (维持现状 / 重新抽取 / Esc-as-keep).
-  function finishOpeningMotion() {
-    if (!openingMotionPending) return;
-    openingMotionPending = false;
-    playOpeningMotion();
-  }
+  // Delayed mulligan prompt (v1.3.1): fires after the opening deal finishes.
+  // Cleared in startGame (restart) and showResult (dialog never after end);
+  // maybePromptMulligan itself re-checks round/finished/hidden state so a
+  // stale timer can never pop the dialog mid-turn or on a dead view.
+  let mulliganPromptTimer = null;
 
   function showBattle() {
     setupView.hidden = true;
@@ -312,6 +308,11 @@
     hideActionToast();
     if (resultDialog.open) resultDialog.close();
     closeMulliganDialog();
+    // No stale deal->prompt timer may pop the dialog over the setup view.
+    if (mulliganPromptTimer !== null) {
+      clearTimeout(mulliganPromptTimer);
+      mulliganPromptTimer = null;
+    }
     resetSetupTutorialConfirm();
     battleView.hidden = true;
     setupButton.hidden = true;
@@ -447,6 +448,10 @@
     resultPending = false;
     if (resultDialog.open) resultDialog.close();
     closeMulliganDialog();
+    if (mulliganPromptTimer !== null) {
+      clearTimeout(mulliganPromptTimer);
+      mulliganPromptTimer = null;
+    }
     if (rulesDialog.open) rulesDialog.close();
     resetRulesTutorialConfirm();
     resetSetupTutorialConfirm();
@@ -1080,6 +1085,12 @@
     const next = rules.createGame(random, config);
     clearTimeout(revealTimer);
     revealTimer = null;
+    // Restarting a match disarms any pending deal->prompt timer from the
+    // previous game (v1.3.1); startGame re-arms its own below.
+    if (mulliganPromptTimer !== null) {
+      clearTimeout(mulliganPromptTimer);
+      mulliganPromptTimer = null;
+    }
     resultPending = false;
     if (resultDialog.open) resultDialog.close();
     game = next;
@@ -1107,12 +1118,14 @@
     showBattle();
     clearMotion(); // a fresh formal game starts its own motion cleanly
     playMotionOnce(battleView, 'view-enter', 320);
-    if (promptMulligan && maybePromptMulligan()) {
-      // Dialog open: the hand must not be already dealt behind it. Delay
-      // the opening motion until the player answers (keep/redraw/Esc).
-      openingMotionPending = true;
-    } else {
-      playOpeningMotion();
+    // v1.3.1: the opening deal plays first and the mulligan prompt waits for
+    // it (~700ms deal; reduced motion gets a near-instant prompt). Redraw
+    // replays the deal itself; keep just closes the dialog (no second deal).
+    playOpeningMotion();
+    clearTimeout(mulliganPromptTimer);
+    mulliganPromptTimer = null;
+    if (promptMulligan) {
+      mulliganPromptTimer = setTimeout(maybePromptMulligan, motionEnabled() ? 700 : 0);
     }
   }
 
@@ -1260,6 +1273,30 @@
       <span class="card-top"><span class="card-size">${card.size}<small>格</small></span>${marker}</span>
       <span class="mini-shape${Math.max(pose.width, pose.height) > 4 ? ' long-shape' : ''}" aria-hidden="true">${shapeCells(pose)}</span>
       <span class="card-bottom"><span class="card-name">${card.name}</span><span class="card-cost"><span class="cost-tag" aria-hidden="true">特攻</span><span aria-hidden="true">◇</span>${card.cost}</span></span>`;
+  }
+
+  // Drag ghost content (v1.3.1): a board-consistent footprint — square cells
+  // laid out on the card's rotated grid — instead of the full card face.
+  // Same shapeCells data as the board preview, so what follows the finger
+  // matches what will land on the board (no name/cost/card shell).
+  function ghostFootprintMarkup(card, turn) {
+    const pose = card.rotations[turn];
+    return `<span class="ghost-shape" style="--ghost-cols:${pose.width};--ghost-rows:${pose.height}" aria-hidden="true">${shapeCells(pose)}</span>`;
+  }
+
+  // Ghost geometry follows the live board: cell size and gap are measured
+  // from #board each time a drag starts, so the footprint is the same size
+  // as the tiles it hovers (and stays right after rotation/resize).
+  function syncGhostMetrics() {
+    const rect = board.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const style = getComputedStyle(board);
+    const gap = parseFloat(style.columnGap) || 0;
+    const cell = (rect.width - gap * (COLS - 1)) / COLS;
+    const rowHeight = (rect.height - gap * (ROWS - 1)) / ROWS;
+    dragGhost.style.setProperty('--ghost-cell', `${cell}px`);
+    dragGhost.style.setProperty('--ghost-row', `${rowHeight}px`);
+    dragGhost.style.setProperty('--ghost-gap', `${gap}px`);
   }
 
   function renderNextDraw() {
@@ -1672,14 +1709,21 @@
   // =====================================================================
 
   function maybePromptMulligan() {
+    if (mulliganPromptTimer !== null) {
+      clearTimeout(mulliganPromptTimer);
+      mulliganPromptTimer = null;
+    }
     if (mulliganPrompted) return false;
     if (trial || tutorial.active) return false;
+    // Delayed-fire guards: the game/view must still be live round 1 with the
+    // chance unconsumed when the deal timer lands (v1.3.1).
     if (!game || game.finished || game.round !== 1 || game.mulliganUsed.player) return false;
+    if (battleView.hidden || revealTimer !== null) return false;
     mulliganPrompted = true;
     mulliganDialog.showModal();
     updateMulliganButton(); // hide the inline duplicate behind the dialog
     mulliganKeepButton.focus();
-    return true; // caller delays the opening deal until the answer
+    return true;
   }
 
   function closeMulliganDialog() {
@@ -1687,6 +1731,7 @@
   }
 
   // Keep: consume the opportunity without swapping; the hand stays as is.
+  // The opening deal already played (v1.3.1) — no second deal on keep.
   function keepMulligan() {
     closeMulliganDialog();
     if (!game || trial || tutorial.active || game.mulliganUsed.player) return;
@@ -1696,15 +1741,15 @@
     status.textContent = '保留当前手牌，本局不能再换';
     status.dataset.state = 'valid';
     board.focus({ preventScroll: true });
-    finishOpeningMotion(); // deal now — the dialog had delayed it (v1.3-B1)
   }
 
-  // Redraw: reuse the engine's one-time mulligan (swap + refresh renders).
+  // Redraw: reuse the engine's one-time mulligan (swap + refresh renders),
+  // then replay the opening deal so the swapped hand visibly deals in.
   function redrawMulligan() {
     closeMulliganDialog();
     takeMulligan();
     board.focus({ preventScroll: true });
-    finishOpeningMotion(); // deal the swapped hand (v1.3-B1)
+    playOpeningMotion();
   }
 
   // Esc / dialog cancel counts as "keep": the opportunity must never be
@@ -1753,6 +1798,11 @@
     if (tutorial.active) return; // tutorial ending never opens the dialog
     clearMotion(); // result dialog: no dealing/shuffling residue behind it
     closeMulliganDialog();
+    // The deal->prompt timer must never fire into a finished match.
+    if (mulliganPromptTimer !== null) {
+      clearTimeout(mulliganPromptTimer);
+      mulliganPromptTimer = null;
+    }
     const counts = rules.score(game.board);
     const won = counts.player > counts.cpu;
     const unlocked = won && !trial ? setup.awardVictory() : [];
@@ -1886,7 +1936,8 @@
           if (!card) { cancelDrag(); return; }
           card.classList.add('dragging');
           const pressed = game.players.player.hand[drag.slot];
-          dragGhost.innerHTML = cardMarkup(pressed, drag.dragRotation, '');
+          dragGhost.innerHTML = ghostFootprintMarkup(pressed, drag.dragRotation);
+          syncGhostMetrics();
           dragGhost.hidden = false;
           locked = null;
           hovered = null;
@@ -1897,7 +1948,8 @@
           card.classList.add('dragging');
           const player = game.players.player;
           const pressed = player.hand[drag.slot];
-          dragGhost.innerHTML = cardMarkup(pressed, drag.dragRotation, '');
+          dragGhost.innerHTML = ghostFootprintMarkup(pressed, drag.dragRotation);
+          syncGhostMetrics();
           dragGhost.hidden = false;
           locked = null;
           hovered = null;
@@ -1912,6 +1964,10 @@
       drag.frame = null;
       moveGhost(drag.lastX, drag.lastY);
       const target = targetFromPoint(drag.lastX, drag.lastY - DRAG_LIFT_PX);
+      // v1.3.1: over the board the ghost hides so the real target tile shows
+      // through (.tile.preview carries the shape); off-board the footprint
+      // ghost follows the finger.
+      dragGhost.hidden = target !== null;
       const changed = target?.x !== hovered?.x || target?.y !== hovered?.y;
       if (changed) {
         hovered = target;
@@ -1921,12 +1977,15 @@
   }
 
   // Board drag start: drop the locked anchor and re-anchor the shared ghost
-  // to the current card shape; the preview then follows via hovered.
+  // to the current card shape; the preview then follows via hovered. The
+  // ghost starts hidden (the press is on a board tile): the next pointermove
+  // shows it only while the lifted finger is off the board (v1.3.1).
   function enterBoardDrag() {
     const card = game.players.player.hand[slot];
     if (!card) { cancelBoardDragPress(); return; }
-    dragGhost.innerHTML = cardMarkup(card, rotation, '');
-    dragGhost.hidden = false;
+    dragGhost.innerHTML = ghostFootprintMarkup(card, rotation);
+    syncGhostMetrics();
+    dragGhost.hidden = true;
     setBoardDragTouchAction(true);
     locked = null;
     hovered = null;
