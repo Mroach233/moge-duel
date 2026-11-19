@@ -196,6 +196,13 @@
       return rewards.filter(({ unlockWins }) => previous < unlockWins && unlockWins <= totalWins());
     }
 
+    // Current loadout as a startGame config — used by the tutorial's
+    // replay path so "再看教学" finishes into the player's own choices.
+    function getLoadout() {
+      const { mapId, difficultyId, mode, customDeck } = loadout;
+      return { mapId, difficultyId, deckIds: mode === 'custom' ? customDeck.slice() : null };
+    }
+
     byId('starter-deck').addEventListener('click', () => {
       loadout.mode = 'starter';
       saveLoadout();
@@ -232,6 +239,6 @@
     });
 
     renderSetup();
-    return { show, awardVictory };
+    return { show, awardVictory, getLoadout };
   };
 })();

@@ -94,6 +94,19 @@
       '...#.#.......',
       '#...........#',
     ], 3),
+    makeMap('twins', '双子岛', '两块墨区只靠中央窄口相连，先占 G05/G07 的人先打到对面。', [
+      '.....###.....',
+      '.....###.....',
+      '.....###.....',
+      '.....###.....',
+      '#.....B.....#',
+      '..P.......C..',
+      '#.....B.....#',
+      '.....###.....',
+      '.....###.....',
+      '.....###.....',
+      '.....###.....',
+    ], 1),
   ];
 
   const DIFFICULTIES = [
@@ -185,6 +198,7 @@
       board, map, difficulty,
       round: 1,
       finished: false,
+      mulliganUsed: { player: false, cpu: false },
       players: { player: createPlayer(deck, deckIds === null, random), cpu: createPlayer(STARTER, true, random) },
     };
   }
@@ -225,21 +239,150 @@
     return connected ? null : 'connection';
   }
 
+  // UI metadata for a special attack: which footprint cells would flip enemy
+  // ink, stay neutral, or are blocked, plus every own tile that can serve as
+  // an origin (own core or own occupied bridge cell, 8-adjacent to the shape).
+  // Reuses tileAt/inBounds so it can never disagree with placementError.
+  function attackMeta(game, side, cells) {
+    const { board, map } = game;
+    const meta = { origins: [], flips: [], neutrals: [], blocked: [] };
+    const originSeen = new Set();
+    for (const cell of cells) {
+      const tile = tileAt(board, cell.x, cell.y);
+      if (!inBounds(cell.x, cell.y) || tile.kind === 'wall' || tile.kind === 'clash' || tile.kind === 'core') {
+        meta.blocked.push({ x: cell.x, y: cell.y });
+      } else if (tile.kind === 'ink' && tile.owner !== side) {
+        meta.flips.push({ x: cell.x, y: cell.y });
+      } else {
+        meta.neutrals.push({ x: cell.x, y: cell.y });
+      }
+      for (const [dx, dy] of NEIGHBORS) {
+        const x = cell.x + dx;
+        const y = cell.y + dy;
+        const neighbor = tileAt(board, x, y);
+        const index = y * COLS + x;
+        if (!originSeen.has(index) && neighbor.owner === side
+          && (neighbor.kind === 'core' || map.bridgeCells.has(index))) {
+          originSeen.add(index);
+          meta.origins.push({ x, y });
+        }
+      }
+    }
+    return meta;
+  }
+
+  // One-time opening mulligan (design 8.4): the old 4 cards go back to the
+  // FRONT of the pile (farthest from the draw end) in their original order,
+  // and the new hand is exactly the 4 cards that would have been drawn next.
+  // No SP change, no discard gain, no reshuffle, pile stays DECK_SIZE - 4.
+  // Fails once used or after round 1.
+  function mulligan(game, side) {
+    const player = game.players[side];
+    if (game.finished || game.round !== 1 || game.mulliganUsed[side] || !player) return false;
+    if (player.hand.length !== 4 || player.pile.length !== DECK_SIZE - 4) return false;
+    game.mulliganUsed[side] = true;
+    player.pile = [...player.hand, ...player.pile];
+    player.hand = player.pile.splice(player.pile.length - 4, 4);
+    return true;
+  }
+
+  // CPU opening-mulligan decision (design 8.4): score the best placement
+  // for a given candidate hand with chooseCpuMove's gain/capture/cost/advance
+  // terms (no random consumption, so fixed-seed trials stay reproducible).
+  // inspectMove reads the side's actual hand, so the candidate is evaluated
+  // through a shallow ghost clone — the real game is never mutated.
+  function cpuHandBestScore(game, hand) {
+    const { map, difficulty, round } = game;
+    const { sp } = game.players.cpu;
+    const ghost = {
+      ...game,
+      players: { ...game.players, cpu: { ...game.players.cpu, hand } },
+    };
+    let best = 0.5;
+    for (const [slot, card] of hand.entries()) {
+      const modes = sp >= card.cost && round >= difficulty.attackRound ? [false, true] : [false];
+      for (const attack of modes) {
+        for (const [rotation, pose] of card.rotations.entries()) {
+          for (let top = 0; top <= ROWS - pose.height; top += 1) {
+            for (let left = 0; left <= COLS - pose.width; left += 1) {
+              const x = left + Math.floor(pose.width / 2);
+              const y = top + Math.floor(pose.height / 2);
+              const preview = inspectMove(ghost, 'cpu', { slot, rotation, x, y, attack });
+              if (preview.error) continue;
+              let gain = 0;
+              let captures = 0;
+              for (const cell of preview.cells) {
+                const tile = tileAt(ghost.board, cell.x, cell.y);
+                if (tile.kind === 'empty') gain += 1;
+                if (tile.owner === 'player') captures += 1;
+              }
+              if (attack && captures === 0 && round < 10) continue;
+              const advance = (map.cpuStartX - left) * difficulty.advance * (round <= 5 ? 1 : 0.35);
+              const cost = attack ? card.cost * (round <= 9 ? 0.9 : 0.2) : 0;
+              const score = gain + captures * 2 - cost + advance;
+              if (score > best) best = score;
+            }
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  // True only when round 1, unused, unfinished, and the pile's last 4 cards
+  // (the ones a swap would draw) score >= 0.5 above the current hand.
+  function shouldCpuMulligan(game) {
+    if (game.finished || game.round !== 1 || game.mulliganUsed.cpu) return false;
+    const player = game.players.cpu;
+    if (!player || player.hand.length !== 4) return false;
+    const before = cpuHandBestScore(game, player.hand);
+    const after = cpuHandBestScore(game, player.pile.slice(-4));
+    return after >= before + 0.5;
+  }
+
   function inspectMove(game, side, move) {
     const player = game.players[side];
     const card = player.hand[move.slot];
-    if (game.finished || !card) return { cells: [], error: 'card' };
-    if (move.pass) return { card, cells: [], error: null };
+    if (game.finished || !card) return { cells: [], error: 'card', meta: null };
+    if (move.pass) return { card, cells: [], error: null, meta: null };
 
     const pose = card.rotations[move.rotation];
     if (!pose || !Number.isInteger(move.x) || !Number.isInteger(move.y)) {
-      return { card, cells: [], error: 'target' };
+      return { card, cells: [], error: 'target', meta: null };
     }
     const cells = footprint(pose, move.x, move.y);
     const error = move.attack && player.sp < card.cost
       ? 'charge'
       : placementError(game, side, cells, move.attack);
-    return { card, cells, error };
+    // Attack metadata is computed even for illegal moves so the UI can mark
+    // the blocked/flipped cells while explaining the failure.
+    return { card, cells, error, meta: move.attack ? attackMeta(game, side, cells) : null };
+  }
+
+  // Whether the card in `slot` has at least one legal placement for `side`:
+  // 4 rotations x every anchor that keeps the whole shape on the board.
+  // Every check delegates to inspectMove, so UI greying can never disagree
+  // with what the engine accepts. Attack defaults to false — greying ignores
+  // special attacks, whose availability depends on SP.
+  function hasAnyPlacement(game, side, slot, { attack = false } = {}) {
+    const player = game.players[side];
+    const card = player && player.hand[slot];
+    if (game.finished || !card) return false;
+    for (const [rotation, pose] of card.rotations.entries()) {
+      for (let top = 0; top <= ROWS - pose.height; top += 1) {
+        for (let left = 0; left <= COLS - pose.width; left += 1) {
+          const move = {
+            slot,
+            rotation,
+            x: left + Math.floor(pose.width / 2),
+            y: top + Math.floor(pose.height / 2),
+            attack,
+          };
+          if (!inspectMove(game, side, move).error) return true;
+        }
+      }
+    }
+    return false;
   }
 
   function chooseCpuMove(game, random = Math.random) {
@@ -363,7 +506,8 @@
 
   const rules = {
     ROWS, COLS, ROUNDS, DECK_SIZE, MAPS, DIFFICULTIES, CARDS, STARTER,
-    createGame, score, chooseCpuMove, inspectMove, resolveTurn, inBounds,
+    createGame, score, chooseCpuMove, inspectMove, hasAnyPlacement, resolveTurn, inBounds,
+    mulligan, cpuHandBestScore, shouldCpuMulligan,
   };
   if (typeof module === 'object' && module.exports) module.exports = rules;
   else window.InkRules = rules;
