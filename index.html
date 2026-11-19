@@ -2,8 +2,14 @@
 <html lang="zh-Hans">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#101820">
+  <!-- v1.3-A full-screen app shell: run full-bleed in mobile browser UIs
+       without a manifest (design 全屏与表现力-v1.3 §3.1; PWA install is out
+       of scope for v1.3). -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>墨格对决 · 卡牌占地</title>
   <link rel="stylesheet" href="styles.css">
   <script src="rules.js" defer></script>
@@ -220,7 +226,36 @@
     </div>
   </dialog>
 
+  <dialog id="mulligan-dialog" class="dialog mulligan-dialog" aria-labelledby="mulligan-title">
+    <h2 id="mulligan-title">要重新抽取手牌的卡片吗？</h2>
+    <p class="mulligan-note">本局仅此一次</p>
+    <div class="mulligan-actions">
+      <button class="button quiet" id="mulligan-keep" type="button">维持现状</button>
+      <button class="button primary" id="mulligan-redraw" type="button">重新抽取！</button>
+    </div>
+  </dialog>
+
   <div class="action-toast" id="action-toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+
+  <!-- Tutorial focus mask (v1.2 §3): full-viewport SVG shade with cut-out
+       holes for the current substep's targets. Geometry is set from JS
+       (viewBox + base/shade rects) so it never depends on CSS percentages.
+       pointer-events: none — targets under the mask stay tappable. -->
+  <div id="tutorial-mask" hidden aria-hidden="true">
+    <svg id="tutorial-mask-svg" preserveAspectRatio="none" focusable="false">
+      <defs>
+        <mask id="tutorial-mask-cut" maskUnits="userSpaceOnUse">
+          <rect id="tutorial-mask-base" fill="#fff" x="0" y="0" width="0" height="0"></rect>
+          <g id="tutorial-mask-holes" fill="#000"></g>
+        </mask>
+      </defs>
+      <rect id="tutorial-mask-shade" fill="rgba(6,10,14,.74)" x="0" y="0" width="0" height="0" mask="url(#tutorial-mask-cut)"></rect>
+      <g id="tutorial-mask-outlines" fill="none" stroke="#ffd67a" stroke-width="2.5" stroke-linejoin="round"></g>
+    </svg>
+  </div>
+  <!-- Tutorial coach bar: the substep's short instruction, pinned under the
+       topbar. Above the mask so it always stays readable. -->
+  <div id="tutorial-coach" hidden role="status" aria-live="polite"><span id="tutorial-coach-text"></span></div>
 
   <noscript><p class="frame">请启用 JavaScript 后开始对战。</p></noscript>
 </body>

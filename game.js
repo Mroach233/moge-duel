@@ -24,6 +24,9 @@
   const phase = byId('phase');
   const rulesDialog = byId('rules-dialog');
   const resultDialog = byId('result-dialog');
+  const mulliganDialog = byId('mulligan-dialog');
+  const mulliganKeepButton = byId('mulligan-keep');
+  const mulliganRedrawButton = byId('mulligan-redraw');
   const rulesTutorialButton = byId('rules-tutorial');
   const tutorialNextButton = byId('tutorial-next');
   const tutorialSkipButton = byId('tutorial-skip');
@@ -118,15 +121,49 @@
     index: 0,
     phase: 'place', // place | reveal | explain
     step: null,
+    // v1.2 substeps: each scenario splits "one place + confirm" into single
+    // actions (design 教学关-v1.2 §2). Data stays in tutorial.js; the
+    // substep sequence belongs to this controller.
+    substeps: null,
+    substep: 0, // index into substeps
+    arrowBase: null, // last keyboard-walk cell in drag/place substeps
     errors: 0,
+  };
+  // Substep sequences per scenario id. select/drag teach full placement in
+  // step 01; 02 teaches rotation first; 03/04/06 preset rotation; 05 adds
+  // the special toggle before placing.
+  const TUTORIAL_SUBSTEPS = {
+    '01': ['select', 'drag', 'rotate', 'confirm'],
+    '02': ['rotate', 'place', 'confirm'],
+    '03': ['place', 'confirm'],
+    '04': ['place', 'confirm'],
+    '05': ['special', 'place', 'confirm'],
+    '06': ['place', 'confirm'],
+  };
+  const TUTORIAL_SUBSTEP_NAMES = {
+    select: '选择卡牌',
+    drag: '拖到落点',
+    place: '选择落点',
+    rotate: '旋转方向',
+    special: '特殊攻击',
+    confirm: '确认落子',
+    reveal: '同时揭晓',
+    explain: '讲解',
   };
   let sessionTutorialDone = false;
   let skipResetTimer = null;
+  // Opening mulligan prompt (v1.2): fires once per formal startGame after
+  // the battle view renders; module-level so replays can't stack dialogs.
+  let mulliganPrompted = false;
   // Drag state: press -> (moved >= threshold) dragging -> drop/cancel.
   const drag = {
     enabled: readDragFlag(),
     pointerId: null,
     slot: null,
+    // Board drag (v1.2 B): re-drag a locked preview from the board itself.
+    // Hand drags and board drags share the pointermove/up/cancel plumbing;
+    // `board` picks the branch at threshold and at release.
+    board: false,
     startX: 0,
     startY: 0,
     active: false,
@@ -135,6 +172,8 @@
     prevRotation: 0,
     prevAttack: false,
     prevLocked: null,
+    // Board drag: the locked target before the press, so cancel restores it.
+    boardPrevLocked: null,
     // Rotation of the dragged card at press time (ghost rendering).
     dragRotation: 0,
     pendingClick: false,
@@ -171,6 +210,89 @@
     };
   }
 
+  // =====================================================================
+  // v1.3-B1 motion (design 全屏与表现力-v1.3 §4): light one-shot CSS
+  // classes, transform/opacity only, never blocking input. Under
+  // prefers-reduced-motion nothing is animated and no class is added.
+  // =====================================================================
+  const motionTimers = {};
+  let openingMotionPending = false; // opening deal waits for the mulligan answer
+  let lastNextDrawKey = null; // next-draw flips only after a real card change
+  // v1.3-B2: previous score/SP snapshot; null means "no baseline yet" so the
+  // very first render of a match (or tutorial step) never bumps.
+  let lastScoreState = null; // { player, cpu }
+  let lastSpState = null; // { player, cpu }
+
+  function motionEnabled() {
+    try {
+      return !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    } catch {
+      return false; // matchMedia unavailable: stay static
+    }
+  }
+
+  // One-shot animation class: restart-safe (remove + reflow + add) and
+  // self-cleaning, so repeated triggers can't stack stale classes/timers.
+  // `key` defaults to className; pass a unique one when the same class goes
+  // to several elements (player/cpu score/sp) so their timers can't evict
+  // each other.
+  function playMotionOnce(element, className, duration, key = className) {
+    if (!motionEnabled() || !element) return;
+    element.classList.remove(className);
+    void element.offsetWidth; // force reflow: a repeat add re-runs the animation
+    element.classList.add(className);
+    clearTimeout(motionTimers[key]);
+    motionTimers[key] = setTimeout(() => {
+      delete motionTimers[key];
+      element.classList.remove(className);
+    }, duration);
+  }
+
+  // Drop every motion class, timer and pending flag (view switches, results,
+  // new games) so nothing leaks across surfaces. The per-surface removals
+  // mirror the classes playMotionOnce can add; B1's dealing/shuffling/flip/
+  // view-enter stay in the same sweep (nothing may survive a view switch).
+  function clearMotion() {
+    for (const className of Object.keys(motionTimers)) {
+      clearTimeout(motionTimers[className]);
+      delete motionTimers[className];
+    }
+    battleView.classList.remove('view-enter');
+    hand.classList.remove('dealing');
+    const deckInfo = document.querySelector('.hand-deck');
+    if (deckInfo) deckInfo.classList.remove('shuffling');
+    byId('next-draw').classList.remove('flip');
+    board.classList.remove('revealing');
+    byId('player-score').classList.remove('score-bump');
+    byId('cpu-score').classList.remove('score-bump');
+    byId('player-sp').classList.remove('sp-bump');
+    byId('cpu-sp').classList.remove('sp-bump');
+    byId('turf-bar').classList.remove('turf-bump');
+    document.querySelector('.result-scores').classList.remove('result-bump');
+    // lastScoreState/lastSpState deliberately survive: startGame calls
+    // renderGame() before clearMotion(), so nulling here would erase the
+    // opening baseline and mute the first settled turn. Explicit resets live
+    // in startGame/showTutorialStep (before their own renderGame).
+    openingMotionPending = false;
+  }
+
+  // Opening deal: hand cards fly in from the deck corner, deck icon shuffles.
+  // Never called for tutorial steps (showTutorialStep owns that flow).
+  function playOpeningMotion() {
+    if (!motionEnabled() || tutorial.active || battleView.hidden) return;
+    playMotionOnce(hand, 'dealing', 700);
+    const deckInfo = document.querySelector('.hand-deck');
+    if (deckInfo && !deckInfo.hidden) playMotionOnce(deckInfo, 'shuffling', 700);
+  }
+
+  // The opening mulligan dialog delayed the deal; run it once the player
+  // answers (维持现状 / 重新抽取 / Esc-as-keep).
+  function finishOpeningMotion() {
+    if (!openingMotionPending) return;
+    openingMotionPending = false;
+    playOpeningMotion();
+  }
+
   function showBattle() {
     setupView.hidden = true;
     battleView.hidden = false;
@@ -179,13 +301,23 @@
     board.focus({ preventScroll: true });
   }
 
+  function setupHasResume() {
+    // A formal match in progress can be resumed; a finished or cleared one
+    // cannot. Tutorial boards never offer 返回对局 (they end at setup).
+    return Boolean(game && !game.finished && !tutorial.active);
+  }
+
   function showSetup() {
+    clearMotion(); // no motion class/timer leaks into setup
     hideActionToast();
     if (resultDialog.open) resultDialog.close();
+    closeMulliganDialog();
     resetSetupTutorialConfirm();
     battleView.hidden = true;
     setupButton.hidden = true;
-    setup.show(!game || !game.finished);
+    // v1.2: 「返回对局」 only for a running formal match. After the
+    // tutorial game is cleared, so the setup view must never offer resume.
+    setup.show(setupHasResume());
     window.scrollTo(0, 0);
   }
 
@@ -238,6 +370,32 @@
     return true;
   }
 
+  function tutorialSubstep() {
+    return tutorial.substeps ? tutorial.substeps[tutorial.substep] : null;
+  }
+
+  // Substeps that let the scripted card land on the board (drag or tap).
+  function tutorialBoardSubstep() {
+    const current = tutorialSubstep();
+    return current === 'drag' || current === 'place';
+  }
+
+  // Advance to a named substep (or the next one by default) and refresh all
+  // dependent UI. Used by select/drag/rotate/special transitions; confirm
+  // advances to the reveal via tutorialConfirm.
+  function advanceTutorialSubstep(next) {
+    const substeps = tutorial.substeps ?? [];
+    const index = next
+      ? substeps.indexOf(next)
+      : tutorial.substep + 1;
+    if (index >= 0 && index < substeps.length) tutorial.substep = index;
+    renderHand();
+    renderPreview();
+    tutorialRenderChrome();
+    tutorialRenderSubstepStatus('');
+    tutorialScheduleMask();
+  }
+
   function tutorialTarget() {
     return { x: tutorial.step.player.x, y: tutorial.step.player.y };
   }
@@ -247,11 +405,11 @@
   }
 
   function tutorialRotationAllowed() {
-    return tutorial.step.id === '01' || tutorial.step.id === '02';
+    return tutorialSubstep() === 'rotate';
   }
 
   function tutorialAttackAllowed() {
-    return tutorial.step.id === '05';
+    return tutorialSubstep() === 'special';
   }
 
   // Inline confirms (design 1.4/5.3): no window.confirm anywhere. Both
@@ -279,6 +437,7 @@
     tutorial.replay = Boolean(replay);
     tutorial.config = config ?? setup.getLoadout();
     tutorial.index = 0;
+    tutorial.substep = 0;
     tutorial.errors = 0;
     document.body.classList.add('tutorial-mode');
     setupView.hidden = true;
@@ -287,25 +446,40 @@
     hideActionToast();
     resultPending = false;
     if (resultDialog.open) resultDialog.close();
+    closeMulliganDialog();
     if (rulesDialog.open) rulesDialog.close();
     resetRulesTutorialConfirm();
     resetSetupTutorialConfirm();
     showTutorialStep();
   }
 
-  // Load one step: fresh game, scripted slot selected, rotation preset.
+  // Load one step: fresh game, scripted card preselected (except step 01's
+  // select substep), rotation preset (except steps 01/02, which teach it).
   function showTutorialStep() {
     const step = tutData.TUTORIAL_STEPS[tutorial.index];
     tutorial.step = step;
     tutorial.phase = 'place';
     tutorial.errors = 0;
-    tutorial.locked = false;
+    tutorial.lastReport = null; // fresh log per step
+    // v1.2: per-scenario substep machine; always start from the first one.
+    tutorial.substeps = TUTORIAL_SUBSTEPS[step.id];
+    tutorial.substep = 0;
+    tutorial.arrowBase = null;
     // New step: disarm any two-stage skip so label and state stay in sync.
     clearTimeout(skipResetTimer);
     skipResetTimer = null;
     game = tutData.createTutorialGame(step);
     cpuMove = { ...step.cpu };
-    slot = step.player.slot;
+    clearMotion(); // tutorial steps never deal/shuffle/flip (v1.3-B1)
+    lastNextDrawKey = null; // tutorial hides the chip; reset for a later formal game
+    // New step, new baseline: the step's opening render must not bump even
+    // though the previous step's score/SP state differs (v1.3-B2).
+    lastScoreState = null;
+    lastSpState = null;
+    // Step 01 starts with no card selected (select substep teaches picking);
+    // step 02 keeps the scripted card selected with rotation 0 (rotate twice
+    // to r2); 03/04/05/06 preset the scripted rotation.
+    slot = step.id === '01' ? null : step.player.slot;
     rotation = step.id === '01' || step.id === '02' ? 0 : step.player.rotation;
     attack = false;
     locked = null;
@@ -328,13 +502,50 @@
     renderGame();
     showBattle();
     tutorialRenderChrome();
-    tutorialRenderStatus(step.instruction, '');
+    tutorialRenderSubstepStatus('');
+    tutorialScheduleMask();
+  }
+
+  // Short per-substep instruction. `extra` is appended (e.g. an error hint).
+  function tutorialSubstepHint(step, current) {
+    if (current === 'select') {
+      return `点选 ${step.player.slot + 1} 号「${game.players.player.hand[step.player.slot].name}」。`;
+    }
+    if (current === 'drag') {
+      return `按住卡牌拖到高亮格 ${positionName(tutorialTarget())}。`;
+    }
+    if (current === 'rotate') {
+      return step.hint.rotation ?? '点「旋转」调整方向。';
+    }
+    if (current === 'special') {
+      return `点「特殊攻击」，把 ${step.player.slot + 1} 号「${game.players.player.hand[step.player.slot].name}」落到 ${positionName(tutorialTarget())}。`;
+    }
+    if (current === 'place') {
+      return `点或拖到高亮格 ${positionName(tutorialTarget())}。`;
+    }
+    return step.player.attack ? '点「确认攻击」。' : '点「确认落子」。';
+  }
+
+  function tutorialRenderSubstepStatus(extra) {
+    const step = tutorial.step;
+    const current = tutorialSubstep();
+    if (!current) {
+      // Reveal/explain windows keep their own status copy.
+      tutorialRenderStatus(extra ?? '', extra ? 'invalid' : '');
+      return;
+    }
+    // Step 05's confirm reads 确认攻击 to match the button (design §2).
+    const name = current === 'confirm' && step.player.attack ? '确认攻击' : TUTORIAL_SUBSTEP_NAMES[current] ?? '';
+    const base = `${name}：${tutorialSubstepHint(step, current)}`;
+    tutorialRenderStatus(extra ? `${extra} ${base}` : base, extra ? 'invalid' : '');
   }
 
   // Confirm the scripted move: only an exact {slot, rotation, x, y, attack}
-  // match advances. Wrong choices get a short hint, never a silent block.
+  // match advances, and only from the confirm substep. Wrong choices get a
+  // short hint, never a silent block.
   function tutorialConfirm() {
     if (tutorial.phase !== 'place' || revealTimer !== null) return;
+    if (tutorialSubstep() !== 'confirm') return; // substep guard
     const step = tutorial.step;
     const scripted = step.player;
     if (slot !== scripted.slot) {
@@ -342,7 +553,7 @@
       return;
     }
     if (rotation !== scripted.rotation) {
-      tutorialHint(tutorialRotationAllowed()
+      tutorialHint(step.id === '01' || step.id === '02'
         ? step.hint.rotation ?? `转不到位：这一步要 r${scripted.rotation}。`
         : '方向已由本步固定。');
       return;
@@ -360,9 +571,13 @@
       return;
     }
     tutorial.phase = 'reveal';
+    tutorial.substep = tutorial.substeps.length; // past confirm: reveal/explain
+    tutorialRenderStatus('双方已锁牌，正在结算。', '');
     renderHand();
     renderPreview();
     renderControls(null);
+    // v1.3-B2: same reveal pulse as the formal play() (motionEnabled gates it).
+    playMotionOnce(board, 'revealing', 380, 'board-reveal');
     revealTimer = setTimeout(() => {
       const before = rules.score(game.board);
       const report = rules.resolveTurn(game, { player: { ...scripted }, cpu: { ...step.cpu } });
@@ -384,8 +599,10 @@
       renderGame();
       tutorialRenderChrome();
       // Step 6 ends with a readable verdict instead of a generic pointer.
+      // Button label is 「完成教学」 (tutorialRenderControls), so the copy
+      // must point at the same word (QA P3 #1).
       tutorialRenderStatus(step.id === '06'
-        ? '终局 51:50，你赢 1 格；点「进入对局」。'
+        ? '终局 51:50，你赢 1 格；点「完成教学」。'
         : '本步结算如上。', 'valid');
       // Step 6 shows the final 51:50; the formal result dialog is skipped.
     }, 240);
@@ -394,10 +611,15 @@
   function tutorialHint(message) {
     tutorial.errors += 1;
     const suffix = tutorial.errors >= 3 ? '（也可以「跳过」）' : '';
-    tutorialRenderStatus(`${message}${suffix}`, 'invalid');
+    const current = tutorialSubstep();
+    if (!current) {
+      tutorialRenderStatus(`${message}${suffix}`, 'invalid');
+      return;
+    }
+    tutorialRenderSubstepStatus(`${message}${suffix}`);
   }
 
-  // "下一步" / "进入对局" after the reveal.
+  // 「下一步」 / 「完成教学」 after the reveal.
   function tutorialNext() {
     if (!tutorial.active || tutorial.phase !== 'explain') return; // double-tap guard
     if (tutorial.index < tutData.TUTORIAL_STEPS.length - 1) {
@@ -411,7 +633,9 @@
   function tutorialComplete() {
     if (!tutorial.replay) markTutorialDone();
     tutorialCleanup();
-    startGame(tutorial.config);
+    game = null; // clear the tutorial board so setup can't resume it
+    showSetup();
+    showActionToast('教学完成，选择地图开始对战');
   }
 
   function tutorialSkip() {
@@ -429,12 +653,18 @@
     skipResetTimer = null;
     if (!tutorial.replay) markTutorialDone();
     tutorialCleanup();
-    startGame(tutorial.config);
+    game = null; // clear the tutorial board so setup can't resume it
+    showSetup();
+    showActionToast('已跳过教学，选择地图开始对战');
   }
 
   function tutorialCleanup() {
     tutorial.active = false;
     tutorial.step = null;
+    tutorial.substeps = null;
+    tutorial.substep = 0;
+    tutorial.arrowBase = null;
+    tutorial.errors = 0;
     legend.classList.remove('attack-mode'); // legend never leaks into formal play
     tutorial.phase = 'place'; // double-tap guard: no stale explain phase
     clearTimeout(skipResetTimer);
@@ -455,6 +685,9 @@
     byId('rule-deck-setup').hidden = false;
     byId('rule-rewards').hidden = false;
     tutorialNextButton.hidden = true;
+    // v1.2 §3: mask and coach must never survive into setup or a formal
+    // match; also drop any queued mask update.
+    tutorialHideMask();
     // Restore the formal action-bar defaults the tutorial hid (design: the
     // formal match must never inherit tutorial visibility state).
     submitButton.hidden = false;
@@ -508,98 +741,327 @@
     if (!tutorial.active) return;
     status.textContent = message;
     status.dataset.state = state;
+    const current = tutorialSubstep();
+    // Step 05's confirm chip reads 确认攻击 to match the button and status.
+    const chipName = current === 'confirm' && tutorial.step.player.attack
+      ? '确认攻击'
+      : TUTORIAL_SUBSTEP_NAMES[current] ?? '选择落点';
     phase.lastElementChild.textContent = tutorial.phase === 'place'
-      ? '选择落点'
+      ? chipName
       : tutorial.phase === 'reveal' ? '同时揭晓' : '讲解';
     phase.classList.toggle('resolving', tutorial.phase === 'reveal');
   }
 
-  // renderControls hook: action-bar buttons per step (design 4.1 item 4).
+  // renderControls hook: only the current substep's controls are visible
+  // (design 教学关-v1.2 §2 — one action at a time). Status copy stays
+  // owned by the substep machine; renderControls never overwrites it here.
   function tutorialRenderControls(preview) {
-    // Step 5 attack mode switches the board legend to the A4 attack key
-    // (起点/反涂/不能落); other steps and non-attack state restore the
-    // normal placement legend (showTutorialStep also clears it on entry).
+    // Step 05 attack mode switches the board legend to the A4 attack key
+    // (起点/反涂/不能落); other states restore the normal placement legend
+    // (showTutorialStep also clears it on entry).
     legend.classList.toggle('attack-mode', attack);
+    // Mask/coach follow every controls pass: explain/reveal hide them here,
+    // place phases re-aim them at the current substep's targets (v1.2 §3).
+    tutorialScheduleMask();
     const step = tutorial.step;
     const scripted = step.player;
+    const current = tutorialSubstep();
     const ready = tutorial.phase === 'place' && revealTimer === null;
-    rotateButton.hidden = !tutorialRotationAllowed();
     passButton.hidden = true;
-    specialButton.hidden = !tutorialAttackAllowed();
     mulliganButton.hidden = true;
     if (tutorial.phase === 'explain') {
       submitButton.hidden = true;
       tutorialNextButton.hidden = false;
-      tutorialNextButton.textContent = step.nextLabel;
-      tutorialNextButton.setAttribute('aria-label', step.nextLabel);
+      // v1.2: the tutorial ends back at setup, so the final label is
+      // 「完成教学」 (design 教学关-v1.2 §2/§5), overriding the v1.1 data's
+      // nextLabel — no formal match starts from the tutorial anymore.
+      const label = step.id === '06' ? '完成教学' : step.nextLabel;
+      tutorialNextButton.textContent = label;
+      tutorialNextButton.setAttribute('aria-label', label);
       tutorialNextButton.disabled = revealTimer !== null;
-      // Explain window: rotation/special are inert (design 4.2).
-      rotateButton.disabled = true;
-      specialButton.disabled = true;
-    } else {
-      tutorialNextButton.hidden = true;
-      submitButton.hidden = false;
-      // Reveal (240ms) disables; during placement the button stays
-      // clickable so mismatches get a hint instead of a silent block.
-      submitButton.disabled = !ready;
-      submitButton.classList.toggle('attack', attack);
-      submitButton.firstElementChild.textContent = attack ? '确认攻击' : '确认落子';
-      submitButton.setAttribute('aria-label', attack ? '确认攻击' : '确认落子');
-      const rotated = tutorialRotationAllowed() && rotation === scripted.rotation;
-      rotateButton.disabled = !ready || rotated;
+      // Explain window: every action control hides (design §2).
+      rotateButton.hidden = true;
+      specialButton.hidden = true;
+      setupButton.disabled = revealTimer !== null;
+      return;
+    }
+    tutorialNextButton.hidden = true;
+    if (tutorial.phase !== 'place' || revealTimer !== null) {
+      // Reveal (240ms): hide everything, status already set elsewhere.
+      submitButton.hidden = true;
+      rotateButton.hidden = true;
+      specialButton.hidden = true;
+      setupButton.disabled = true;
+      return;
+    }
+    setupButton.disabled = false;
+    // Rotate: only in the rotate substep (01/02).
+    rotateButton.hidden = current !== 'rotate';
+    specialButton.hidden = current !== 'special';
+    submitButton.hidden = current !== 'confirm';
+    if (current === 'rotate') {
+      const scriptedRotation = scripted.rotation;
+      const rotated = rotation === scriptedRotation;
+      rotateButton.disabled = rotated;
       rotateLabel.textContent = rotated ? '已转好' : '旋转';
       rotateButton.title = rotated ? '已转好' : '';
-      // special button only clickable in step 5; toast explains elsewhere.
+    }
+    if (current === 'special') {
       // The formal is-locked/aria-disabled state must not leak into steps.
-      specialButton.disabled = !ready || !tutorialAttackAllowed();
+      specialButton.disabled = false;
       specialButton.classList.remove('is-locked');
       specialButton.setAttribute('aria-disabled', 'false');
       const player = game.players.player;
-      const card = player.hand[slot];
+      const card = player.hand[scripted.slot];
       specialLabel.textContent = card ? `特殊攻击 · ${card.cost} SP` : '特殊攻击';
       specialButton.setAttribute('aria-pressed', attack);
-      // target preview requires exact anchor; wrong anchor gives normal ghost
-      const onTarget = locked && locked.x === scripted.x && locked.y === scripted.y;
+    }
+    if (current === 'confirm') {
+      submitButton.classList.toggle('attack', attack);
       submitButton.firstElementChild.textContent = attack ? '确认攻击' : '确认落子';
       submitButton.setAttribute('aria-label', attack ? '确认攻击' : '确认落子');
-      let message = step.instruction;
-      if (!ready) {
-        message = '双方已锁牌，正在结算。';
-      } else if (locked && !onTarget) {
-        message = step.hint.target;
-      } else if (locked) {
-        message = `${positionName(locked)} · 可以确认`;
-      }
-      status.textContent = message;
-      status.dataset.state = locked && !onTarget ? 'invalid' : '';
+      // Confirm stays clickable so mismatches get a hint from
+      // tutorialConfirm's exact-match checks, never a silent block.
+      submitButton.disabled = false;
     }
-    setupButton.disabled = revealTimer !== null;
   }
 
-  // renderPreview hook: highlight the scripted anchor; other anchors show a
-  // normal ghost preview so exploration never looks broken.
+  // renderPreview hook: highlight the scripted anchor in drag/place/confirm,
+  // in step 02's rotate (target visible before anything is locked), and in a
+  // rotate substep with a locked anchor (01: keep D05 lit while turning).
+  // select/special show no landing hint (design 教学关-v1.2 §2).
   function tutorialRenderPreview() {
-    const step = tutorial.step;
     for (const tile of tiles) tile.classList.remove('tutorial-target');
     if (tutorial.phase !== 'place') return;
+    const current = tutorialSubstep();
+    const showTarget = current === 'drag' || current === 'place' || current === 'confirm'
+      || (current === 'rotate' && (tutorial.step.id === '02' || locked));
+    if (!showTarget) return;
     const anchor = tutorialTarget();
     const anchorTile = tiles[anchor.y * COLS + anchor.x];
     anchorTile.classList.add('tutorial-target');
+    // Anchor tile class changed -> mask preview holes need the new rect set.
+    tutorialScheduleMask();
   }
 
-  // renderHand hook: lock every card except the scripted one (design 4.3).
+  // =====================================================================
+  // Focus mask + coach (v1.2 §3): a dimming SVG with cut-out holes over the
+  // current substep's targets plus the placement/attack preview cells.
+  // Pure display: pointer-events none everywhere, targets stay tappable,
+  // the topbar stays holed so 跳过/玩法 keep working. Geometry lives in
+  // element attributes (viewBox + rects), never CSS percentages.
+  // =====================================================================
+
+  const tutorialMaskEl = byId('tutorial-mask');
+  const tutorialMaskSvg = byId('tutorial-mask-svg');
+  const tutorialMaskBase = byId('tutorial-mask-base');
+  const tutorialMaskShade = byId('tutorial-mask-shade');
+  const tutorialMaskHoles = byId('tutorial-mask-holes');
+  const tutorialMaskOutlines = byId('tutorial-mask-outlines');
+  const tutorialCoachEl = byId('tutorial-coach');
+  const tutorialCoachText = byId('tutorial-coach-text');
+  const tutorialTopbar = document.querySelector('.topbar');
+  let tutorialMaskFrame = null;
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  function tutorialSvgRect(x, y, width, height) {
+    const rect = document.createElementNS(SVG_NS, 'rect');
+    rect.setAttribute('x', String(x));
+    rect.setAttribute('y', String(y));
+    rect.setAttribute('width', String(width));
+    rect.setAttribute('height', String(height));
+    return rect;
+  }
+
+  function tutorialVisibleRect(element) {
+    const rect = element.getBoundingClientRect();
+    // Zero-size or detached elements would punch invisible or garbage holes.
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return rect;
+  }
+
+  // Clamp a viewport-space rect so out-of-view targets don't extend the mask
+  // beyond the SVG's viewBox.
+  function tutorialClampRect({ x, y, width, height }, view) {
+    const left = Math.max(0, x);
+    const top = Math.max(0, y);
+    const right = Math.min(view.width, x + width);
+    const bottom = Math.min(view.height, y + height);
+    if (right <= left || bottom <= top) return null;
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  }
+
+  // The current substep's main targets as viewport rects: element + expand
+  // in px. Empty for explain/reveal (design §3: no mask over the log).
+  function tutorialMaskTargets() {
+    if (!tutorial.active || tutorial.phase !== 'place') return [];
+    const current = tutorialSubstep();
+    const anchor = tutorialTarget();
+    const anchorTile = tiles[anchor.y * COLS + anchor.x];
+    const targets = [];
+    const push = (element) => {
+      targets.push({ element, expand: 6 });
+    };
+    if (current === 'select' || current === 'drag') {
+      push(cards[tutorial.step.player.slot]);
+    }
+    // Target tile: drag/place/confirm always; rotate only when it should be
+    // lit (01 after the anchor locked, 02 from the start — design §2).
+    const showAnchorTile = current === 'drag' || current === 'place' || current === 'confirm'
+      || (current === 'rotate' && (tutorial.step.id === '02' || Boolean(locked)));
+    if (showAnchorTile) push(anchorTile);
+    if (current === 'rotate') push(rotateButton);
+    if (current === 'special') push(specialButton);
+    if (current === 'confirm') push(submitButton);
+    return targets;
+  }
+
+  function tutorialUpdateMask() {
+    tutorialMaskFrame = null;
+    const current = tutorial.active ? tutorialSubstep() : null;
+    const visible = tutorial.active && tutorial.phase === 'place' && Boolean(current);
+    const targets = tutorialMaskTargets();
+    if (!visible || targets.length === 0) {
+      tutorialMaskEl.hidden = true;
+      tutorialCoachEl.hidden = true;
+      return;
+    }
+    const view = {
+      width: window.innerWidth,
+      height: window.innerHeight,
+    };
+    tutorialMaskSvg.setAttribute('viewBox', `0 0 ${view.width} ${view.height}`);
+    for (const rect of [tutorialMaskBase, tutorialMaskShade]) {
+      rect.setAttribute('x', '0');
+      rect.setAttribute('y', '0');
+      rect.setAttribute('width', String(view.width));
+      rect.setAttribute('height', String(view.height));
+    }
+    // Holes: topbar (skip/rules stay clear and tappable), each target with a
+    // 6px halo, then the live placement/attack preview cells (shape and flip
+    // path must not be dimmed; design §3 + coordinator addendum). Preview
+    // cells punch holes only — outlines stay on the main targets.
+    const holes = [];
+    const outlines = [];
+    const seen = new Set();
+    const addHole = ({ x, y, width, height }) => {
+      const rounded = `${Math.round(x)},${Math.round(y)},${Math.round(width)},${Math.round(height)}`;
+      if (seen.has(rounded)) return;
+      seen.add(rounded);
+      holes.push({ x, y, width, height });
+    };
+    if (tutorialTopbar) {
+      const bar = tutorialVisibleRect(tutorialTopbar);
+      if (bar) addHole(bar, 'topbar');
+    }
+    for (const { element, expand } of targets) {
+      const rect = tutorialVisibleRect(element);
+      if (!rect) continue;
+      // Hole halo = 6px out; gold outline = 5px out (design §3) — measured
+      // from the raw target rect, so the ring sits just inside the hole.
+      const clamped = tutorialClampRect({
+        x: rect.x - expand,
+        y: rect.y - expand,
+        width: rect.width + expand * 2,
+        height: rect.height + expand * 2,
+      }, view);
+      if (!clamped) continue;
+      addHole(clamped, 'target');
+      const ring = tutorialClampRect({
+        x: rect.x - 5,
+        y: rect.y - 5,
+        width: rect.width + 10,
+        height: rect.height + 10,
+      }, view);
+      if (ring) outlines.push(ring);
+    }
+    const previewCells = [];
+    for (const tile of previewTiles) {
+      if (tile.isConnected && tutorialVisibleRect(tile)) previewCells.push(tile);
+    }
+    for (const tile of tiles) {
+      if (!tile.isConnected) continue;
+      if (!tile.classList.contains('atk-origin') && !tile.classList.contains('atk-flip')
+        && !tile.classList.contains('atk-neutral') && !tile.classList.contains('atk-blocked')
+        && !tile.classList.contains('tutorial-target')) continue;
+      if (!previewCells.includes(tile) && tutorialVisibleRect(tile)) previewCells.push(tile);
+    }
+    for (const tile of previewCells) {
+      const rect = tutorialVisibleRect(tile);
+      if (!rect) continue;
+      const clamped = tutorialClampRect({
+        x: rect.x - 5,
+        y: rect.y - 5,
+        width: rect.width + 10,
+        height: rect.height + 10,
+      }, view);
+      if (clamped) addHole(clamped, 'preview');
+    }
+    tutorialMaskHoles.replaceChildren(...holes.map(
+      ({ x, y, width, height }) => tutorialSvgRect(x, y, width, height),
+    ));
+    // Outlines already carry their 5px halo from the target loop; rx 8 (design §3).
+    tutorialMaskOutlines.replaceChildren(...outlines.map(({ x, y, width, height }) => {
+      const rect = tutorialSvgRect(x, y, width, height);
+      rect.setAttribute('rx', '8');
+      return rect;
+    }));
+    tutorialMaskEl.hidden = false;
+    // Coach text: the same short substep hint the status line uses.
+    tutorialCoachText.textContent = tutorialSubstepHint(tutorial.step, current);
+    tutorialCoachEl.hidden = false;
+    const barBottom = tutorialTopbar ? tutorialTopbar.getBoundingClientRect().bottom : 0;
+    tutorialCoachEl.style.top = `${Math.round(barBottom + 8)}px`;
+  }
+
+  // Coalesce mask updates into one frame; render bursts (hand + preview +
+  // controls per interaction) then hit this once.
+  function tutorialScheduleMask() {
+    if (tutorialMaskFrame !== null) return;
+    tutorialMaskFrame = requestAnimationFrame(tutorialUpdateMask);
+  }
+
+  function tutorialHideMask() {
+    if (tutorialMaskFrame !== null) {
+      cancelAnimationFrame(tutorialMaskFrame);
+      tutorialMaskFrame = null;
+    }
+    // Drop the punched rects too: a hidden mask with stale children must
+    // never reappear (setup/formal residue check in acceptance §6).
+    tutorialMaskHoles.replaceChildren();
+    tutorialMaskOutlines.replaceChildren();
+    tutorialMaskEl.hidden = true;
+    tutorialCoachEl.hidden = true;
+  }
+
+  window.addEventListener('resize', tutorialScheduleMask);
+  // Scrolling (locked board scroll, log scroll, any container) shifts target
+  // rects; capture catches scrolls inside scrollable children too.
+  window.addEventListener('scroll', tutorialScheduleMask, true);
+
+  // renderHand hook: select substep keeps every card clickable (a wrong tap
+  // gets a hint), drag/place keep the scripted card active (drag source), and
+  // rotate/special/confirm disable the whole hand — there is nothing to pick
+  // there (design 教学关-v1.2 §2: one action at a time).
   function tutorialRenderHand() {
     const scripted = tutorialScriptedCard();
+    const current = tutorialSubstep();
+    const selectionOpen = current === 'select' && tutorial.phase === 'place' && revealTimer === null;
+    const handActive = selectionOpen || current === 'drag' || current === 'place';
     cards.forEach((button, index) => {
       const isScript = index === scripted;
-      button.disabled = !isScript || tutorial.phase !== 'place' || revealTimer !== null;
-      button.setAttribute('aria-disabled', isScript ? 'false' : 'true');
+      button.disabled = (!isScript && !selectionOpen) || !handActive
+        || tutorial.phase !== 'place' || revealTimer !== null;
+      // In the select substep non-scripted cards stay clickable so a wrong
+      // tap can be answered with a hint; elsewhere they read as locked.
+      button.setAttribute('aria-disabled', isScript || selectionOpen ? 'false' : 'true');
       button.classList.toggle('tutorial-locked', !isScript);
       button.classList.toggle('tutorial-script', isScript);
     });
   }
 
-  function startGame(config) {
+  function startGame(config, { promptMulligan = true } = {}) {
     // Any formal startMatch ends the tutorial (the setup button is hidden
     // during the tutorial, so this only fires from scripted/programmatic
     // entries). Skip-style cleanup: persist, clear UI, start formal.
@@ -608,9 +1070,12 @@
       tutorialCleanup();
       hideActionToast();
       if (resultDialog.open) resultDialog.close();
+      closeMulliganDialog();
       setupView.hidden = true;
     }
     hideActionToast();
+    closeMulliganDialog();
+    mulliganPrompted = false;
     const random = trial ? seededRandom(trial.seed) : Math.random;
     const next = rules.createGame(random, config);
     clearTimeout(revealTimer);
@@ -634,8 +1099,21 @@
     byId('battle-difficulty').textContent = game.difficulty.name;
     byId('bridge-legend').hidden = game.map.bridgeCells.size === 0;
     board.setAttribute('aria-label', `${game.map.name}占地棋盘`);
+    lastNextDrawKey = null; // opening render: the first chip shows, never flips
+    // Fresh match: no baseline, so the opening renderScore never bumps.
+    lastScoreState = null;
+    lastSpState = null;
     renderGame();
     showBattle();
+    clearMotion(); // a fresh formal game starts its own motion cleanly
+    playMotionOnce(battleView, 'view-enter', 320);
+    if (promptMulligan && maybePromptMulligan()) {
+      // Dialog open: the hand must not be already dealt behind it. Delay
+      // the opening motion until the player answers (keep/redraw/Esc).
+      openingMotionPending = true;
+    } else {
+      playOpeningMotion();
+    }
   }
 
   function resetPlacement() {
@@ -647,29 +1125,55 @@
 
   // Recomputed once per turn (startGame / after resolveTurn), not on SP
   // changes — greying only depends on the board and the current hand.
+  // A card stays bright when either a normal placement or a special attack
+  // (SP + anchor checked inside hasAnyPlacement) is available.
   function computeLegality() {
     const player = game.players.player;
     return player.hand.map((card, slotIndex) => (
-      card ? rules.hasAnyPlacement(game, 'player', slotIndex) : false
+      card ? rules.hasAnyPlacement(game, 'player', slotIndex)
+        || rules.hasAnyPlacement(game, 'player', slotIndex, { attack: true }) : false
     ));
   }
 
   function canPlay() {
     if (tutorial.active) {
       // Step 6 ends with finished=true; the controller owns the phase gates.
-      return tutorial.phase === 'place' && revealTimer === null;
+      // Substeps that accept board input only: select/rotate/special/confirm
+      // keep the board inert (design 教学关-v1.2 §2/§4).
+      return tutorial.phase === 'place' && revealTimer === null
+        && tutorialBoardSubstep();
     }
     return Boolean(game && !game.finished && revealTimer === null);
   }
 
   function renderScore() {
     const counts = rules.score(game.board);
+    // v1.3-B2: bump only on a real change after a baseline exists — the
+    // opening render (startGame/tutorial step) and view switches stay still.
+    const scoreChanged = Boolean(lastScoreState)
+      && (lastScoreState.player !== counts.player || lastScoreState.cpu !== counts.cpu);
+    const spState = { player: game.players.player.sp, cpu: game.players.cpu.sp };
+    const spChanged = Boolean(lastSpState)
+      && (lastSpState.player !== spState.player || lastSpState.cpu !== spState.cpu);
     for (const side of ['player', 'cpu']) {
       byId(`${side}-score`).textContent = twoDigits(counts[side]);
       const sp = byId(`${side}-sp`);
       sp.querySelector('strong').textContent = game.players[side].sp;
       sp.setAttribute('aria-label', `${game.players[side].sp} 点特殊能量`);
     }
+    if (scoreChanged) {
+      // Unique timer keys: the two sides share the class, so the default
+      // className key would let one side's timer evict the other's.
+      playMotionOnce(byId('player-score'), 'score-bump', 420, 'score-player');
+      playMotionOnce(byId('cpu-score'), 'score-bump', 420, 'score-cpu');
+      playMotionOnce(byId('turf-bar'), 'turf-bump', 420, 'turf-bar');
+    }
+    if (spChanged) {
+      playMotionOnce(byId('player-sp'), 'sp-bump', 420, 'sp-player');
+      playMotionOnce(byId('cpu-sp'), 'sp-bump', 420, 'sp-cpu');
+    }
+    lastScoreState = { player: counts.player, cpu: counts.cpu };
+    lastSpState = spState;
 
     byId('round-number').textContent = twoDigits(game.round);
     byId('round-label').textContent = game.finished ? '终局' : '回合';
@@ -736,10 +1240,11 @@
       button.disabled = !canPlay();
       button.classList.toggle('no-placement', !placeable);
       button.setAttribute('aria-pressed', selected);
-      button.setAttribute('aria-label', `${card.name}，${card.size} 格。普通落子不需要能量；特殊攻击消耗 ${card.cost} SP。${placeable ? '' : '当前无合法落点。'}`);
-      const marker = `<span class="card-top-marker"><kbd>${index + 1}</kbd>${placeable ? '' : '<span class="no-placement-mark" aria-hidden="true">无落点</span>'}</span>`;
+      button.setAttribute('aria-label', `${card.name}，${card.size} 格。普通落子不需要能量；特殊攻击消耗 ${card.cost} SP。${placeable ? '' : '普通落子和特攻都不可用。'}`);
+      const marker = `<span class="card-top-marker"><kbd>${index + 1}</kbd>${placeable ? '' : '<span class="no-placement-mark" aria-hidden="true">放不下</span>'}</span>`;
       button.innerHTML = cardMarkup(card, selected ? rotation : 0, marker);
     }
+    if (dimmed) byId('dimmed-note').textContent = '变暗的牌普通落点和特攻都放不下，仍可弃牌。';
     byId('dimmed-note').hidden = !dimmed;
   }
 
@@ -766,6 +1271,17 @@
     byId('next-draw').hidden = !card;
     byId('next-draw-name').textContent = card?.name ?? '';
     byId('next-draw-shape').innerHTML = card ? shapeCells(card.rotations[0]) : '';
+    // v1.3-B1: the refill chip flips once when the upcoming card actually
+    // changes (a draw consumed one). Name+shape key: same name can repeat.
+    // v1.3-B2: only a settled turn (lastTurn non-null) may flip — a mulligan
+    // at the opening of a second game swaps the pile before any settle, and
+    // must only refresh the key, never flash the chip.
+    const key = card ? `${card.name}:${card.rotations[0].cells.length}` : null;
+    if (key !== lastNextDrawKey) {
+      const first = lastNextDrawKey === null; // opening deal: no flip
+      lastNextDrawKey = key;
+      if (!first && key && lastTurn) playMotionOnce(byId('next-draw'), 'flip', 320);
+    }
   }
 
   function suggestOpeningTarget() {
@@ -790,14 +1306,36 @@
   const ATk_CLASSES = ['atk-origin', 'atk-flip', 'atk-neutral', 'atk-blocked', 'atk-anchor'];
 
   function renderPreview() {
+    // #board.attack-focus dims non-core tiles in CSS while aiming a special
+    // attack. Toggled on every render, so cancel/confirm/turn-end clears it
+    // as soon as `attack` returns to false.
+    board.classList.toggle('attack-focus', Boolean(attack));
     if (tutorial.active) {
       const keepTiles = previewTiles;
       previewTiles = [];
+      // Clear every old preview class up front (including preview-core, which
+      // would otherwise survive a rotation when the core cell moves), then
+      // rebuild the new preview below.
+      for (const cell of keepTiles) {
+        cell.classList.remove('preview', 'preview-core', 'locked', 'invalid', 'attacking');
+      }
       for (const tile of tiles) tile.classList.remove(...ATk_CLASSES);
       if (targetTile) targetTile.removeAttribute('data-target');
       targetTile = null;
       const scripted = tutorial.step.player;
-      const target = tutorial.phase === 'place' && revealTimer === null ? locked ?? hovered : null;
+      const current = tutorialSubstep();
+      // Ghost preview: drag/place (hover or locked anchor), the confirm
+      // substep's locked anchor, and a rotate substep that already locked
+      // the anchor (01: the player must see the shape they are turning).
+      // select/special stay clean; 02's rotate has no locked anchor yet.
+      // v1.3-B2: the reveal window keeps the locked preview visible so the
+      // reveal breathe has a target (phase flips to 'reveal' before this
+      // render and to 'explain' at the settle); the settle render clears it.
+      const previewSubstep = current === 'drag' || current === 'place' || current === 'confirm'
+        || (current === 'rotate' && locked);
+      const target = (tutorial.phase === 'place' && revealTimer === null && previewSubstep)
+        || (tutorial.phase === 'reveal' && locked)
+        ? locked ?? hovered : null;
       const preview = target ? rules.inspectMove(game, 'player', makeMove(target)) : null;
       if (preview) {
         for (const cell of preview.cells) {
@@ -813,7 +1351,8 @@
         targetTile = tiles[target.y * COLS + target.x];
         targetTile.setAttribute('data-target', '');
       }
-      if (tutorial.phase === 'place' && revealTimer === null && attack && tutorialAttackAllowed()) {
+      if (tutorial.phase === 'place' && revealTimer === null && attack
+        && (current === 'special' || current === 'place' || current === 'confirm')) {
         if (preview) {
           const { meta } = preview;
           for (const cell of meta.origins) tiles[cell.y * COLS + cell.x].classList.add('atk-origin');
@@ -827,12 +1366,11 @@
           // No target yet: preview the scripted step-5 attack so only the
           // script origin (G05) is highlighted, with its H05-J05 flip path
           // (design 4.2), instead of framing every player core.
-          const scriptedMove = tutorial.step.player;
           const scriptedPreview = rules.inspectMove(game, 'player', {
-            slot: scriptedMove.slot,
-            rotation: scriptedMove.rotation,
-            x: scriptedMove.x,
-            y: scriptedMove.y,
+            slot: scripted.slot,
+            rotation: scripted.rotation,
+            x: scripted.x,
+            y: scripted.y,
             attack: true,
           });
           if (scriptedPreview && !scriptedPreview.error && scriptedPreview.meta) {
@@ -848,9 +1386,6 @@
       tutorialRenderPreview();
       // Non-target anchors show the ghost but never enable submit via preview;
       // submit validation is the tutorialConfirm exact-match check.
-      if (keepTiles !== previewTiles) {
-        for (const cell of keepTiles) cell.classList.remove('preview', 'preview-core', 'locked', 'invalid', 'attacking');
-      }
       renderControls(preview);
       return;
     }
@@ -862,7 +1397,12 @@
     if (targetTile) targetTile.removeAttribute('data-target');
     targetTile = null;
 
-    const target = canPlay() ? locked ?? hovered ?? openingPreview() : null;
+    // v1.3-B2: during the 240ms lock window (canPlay false, revealTimer
+    // running) the locked preview stays visible so the reveal breathe has a
+    // target; the settle render clears it via resetPlacement. No input is
+    // restored — renderControls still reports 双方已锁牌.
+    const target = canPlay() ? locked ?? hovered ?? openingPreview()
+      : revealTimer !== null && locked ? locked : null;
     const preview = target ? rules.inspectMove(game, 'player', makeMove(target)) : null;
     if (preview) {
       for (const cell of preview.cells) {
@@ -1020,11 +1560,27 @@
   }
 
   function selectCard(index) {
-    if (!canPlay() || index === slot) return;
-    if (tutorial.active && index !== tutorialScriptedCard()) {
-      tutorialHint(tutorial.step.hint.card);
+    if (tutorial.active) {
+      if (tutorial.phase !== 'place' || revealTimer !== null) return;
+      const current = tutorialSubstep();
+      if (current === 'select') {
+        if (index === tutorialScriptedCard()) {
+          // Picked the scripted card: enter the drag substep unselected
+          // (slot stays null; the drag itself selects via substep entry).
+          slot = tutorialScriptedCard();
+          rotation = 0;
+          advanceTutorialSubstep('drag');
+          renderHand();
+          renderPreview();
+          return;
+        }
+        tutorialHint(tutorial.step.hint.card);
+        return;
+      }
+      // Non-select substeps: taps on cards are inert (card is preselected).
       return;
     }
+    if (!canPlay() || index === slot) return;
     const card = game.players.player.hand[index];
     if (!card) return;
     hideActionToast();
@@ -1036,24 +1592,32 @@
   }
 
   function rotateCard(direction) {
-    if (!canPlay()) return;
     if (tutorial.active) {
-      if (tutorial.phase !== 'place') return;
-      if (!tutorialRotationAllowed()) {
-        tutorialHint('方向已由本步固定。');
-        return;
-      }
+      if (tutorial.phase !== 'place' || revealTimer !== null) return;
+      if (tutorialSubstep() !== 'rotate') return; // hidden elsewhere anyway
       rotation = (rotation + direction + 4) % 4;
       renderHand();
       renderPreview();
-      const scripted = tutorial.step.player.rotation;
+      const step = tutorial.step;
+      const scripted = step.player.rotation;
       if (rotation === scripted) {
-        tutorialRenderStatus('已转好。', 'valid');
-      } else {
-        tutorialRenderStatus(tutorial.step.hint.rotation ?? '再点「旋转」调整方向。', '');
+        // 01: rotate -> confirm; 02: rotate -> place (design 教学关-v1.2 §2).
+        advanceTutorialSubstep(step.id === '01' ? 'confirm' : 'place');
+        return;
       }
+      if (step.id === '02' && rotation === 1) {
+        // 02 goes 0 -> 1 -> 2; r1 is the expected midpoint (one click past
+        // the start). Not an error: clear the status extra and keep the
+        // standard 旋转方向 guidance (no red invalid state, no error count).
+        tutorialRenderSubstepStatus('');
+        return;
+      }
+      // Any other off-script direction (Shift+R backwards, or 01 turning the
+      // wrong way) counts as an error with a hint; 3 in a row offers skip.
+      tutorialHint(step.hint.rotation ?? '方向不对，再点「旋转」调整。');
       return;
     }
+    if (!canPlay()) return;
     rotation = (rotation + direction + 4) % 4;
     renderHand();
     renderPreview();
@@ -1093,29 +1657,86 @@
   }
 
   function updateMulliganButton() {
-    const show = !trial && canPlay() && game.round === 1 && !game.mulliganUsed.player;
+    // The opening dialog is the primary affordance; while it is open the
+    // inline button would be a dead duplicate behind the modal (QA P3 #2).
+    const show = !trial && canPlay() && game.round === 1 && !game.mulliganUsed.player
+      && !mulliganDialog.open;
     mulliganButton.hidden = !show;
   }
 
+  // =====================================================================
+  // Opening mulligan dialog (v1.2 A): after a formal startGame the player
+  // gets one modal prompt. Either button consumes the one-time opportunity
+  // (keep sets the flag without swapping), so the #mulligan button never
+  // offers a second chance and the dialog can't be reopened via Esc.
+  // =====================================================================
+
+  function maybePromptMulligan() {
+    if (mulliganPrompted) return false;
+    if (trial || tutorial.active) return false;
+    if (!game || game.finished || game.round !== 1 || game.mulliganUsed.player) return false;
+    mulliganPrompted = true;
+    mulliganDialog.showModal();
+    updateMulliganButton(); // hide the inline duplicate behind the dialog
+    mulliganKeepButton.focus();
+    return true; // caller delays the opening deal until the answer
+  }
+
+  function closeMulliganDialog() {
+    if (mulliganDialog.open) mulliganDialog.close();
+  }
+
+  // Keep: consume the opportunity without swapping; the hand stays as is.
+  function keepMulligan() {
+    closeMulliganDialog();
+    if (!game || trial || tutorial.active || game.mulliganUsed.player) return;
+    game.mulliganUsed.player = true;
+    // Dialog closed but flag consumed: keep the button hidden either way.
+    updateMulliganButton();
+    status.textContent = '保留当前手牌，本局不能再换';
+    status.dataset.state = 'valid';
+    board.focus({ preventScroll: true });
+    finishOpeningMotion(); // deal now — the dialog had delayed it (v1.3-B1)
+  }
+
+  // Redraw: reuse the engine's one-time mulligan (swap + refresh renders).
+  function redrawMulligan() {
+    closeMulliganDialog();
+    takeMulligan();
+    board.focus({ preventScroll: true });
+    finishOpeningMotion(); // deal the swapped hand (v1.3-B1)
+  }
+
+  // Esc / dialog cancel counts as "keep": the opportunity must never be
+  // left unconsumed behind a dismissed dialog.
+  mulliganDialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    keepMulligan();
+  });
+  mulliganKeepButton.addEventListener('click', keepMulligan);
+  mulliganRedrawButton.addEventListener('click', redrawMulligan);
+
   function toggleSpecial() {
-    if (!canPlay() || battleView.hidden || rulesDialog.open) return;
+    if (battleView.hidden || rulesDialog.open) return;
     if (tutorial.active) {
-      if (tutorial.phase !== 'place') return;
-      if (!tutorialAttackAllowed()) {
-        tutorialHint('特攻后面再学，本步先普通落子。');
+      if (tutorial.phase !== 'place' || revealTimer !== null) return;
+      if (tutorialSubstep() !== 'special') return; // hidden elsewhere anyway
+      if (attack) {
+        // Cancel keeps the player in the special substep (design §2).
+        attack = false;
+        renderHand();
+        renderPreview();
+        tutorialRenderSubstepStatus('');
         return;
       }
-      attack = !attack;
+      attack = true;
       renderHand();
       renderPreview();
-      const scripted = tutorial.step.player;
-      if (attack) {
-        tutorialRenderStatus(`特攻要贴着己方特殊格 G05。落到 ${tutData.positionName({ x: scripted.x, y: scripted.y })}。`, 'attack');
-      } else {
-        tutorialRenderStatus('已取消特攻，可再点亮。', '');
-      }
+      // Attack lit: move on to placing the scripted special attack.
+      advanceTutorialSubstep('place');
       return;
     }
+    if (!canPlay()) return;
     const player = game.players.player;
     const card = player.hand[slot];
     if (!card) return;
@@ -1130,12 +1751,16 @@
 
   function showResult() {
     if (tutorial.active) return; // tutorial ending never opens the dialog
+    clearMotion(); // result dialog: no dealing/shuffling residue behind it
+    closeMulliganDialog();
     const counts = rules.score(game.board);
     const won = counts.player > counts.cpu;
     const unlocked = won && !trial ? setup.awardVictory() : [];
     byId('result-title').textContent = won ? '你赢了！' : counts.player < counts.cpu ? '电脑获胜' : '平局';
     byId('result-player').textContent = counts.player;
     byId('result-cpu').textContent = counts.cpu;
+    // v1.3-B2: one settle-in bounce for the final score figures.
+    playMotionOnce(document.querySelector('.result-scores'), 'result-bump', 460, 'result-scores');
     byId('result-unlocks').hidden = unlocked.length === 0;
     trialReplay.hidden = !trial;
     byId('reward-list').replaceChildren(...unlocked.map(({ type, name }) => {
@@ -1155,6 +1780,9 @@
     }
     if (!canPlay() || rules.inspectMove(game, 'player', move).error) return;
     hideActionToast();
+    // v1.3-B2: preview tiles breathe while both sides are locked (240ms),
+    // then the class clears itself after 380ms — past the settle render.
+    playMotionOnce(board, 'revealing', 380, 'board-reveal');
     revealTimer = setTimeout(() => {
       const before = rules.score(game.board);
       lastTurn = rules.resolveTurn(game, { player: move, cpu: cpuMove });
@@ -1185,10 +1813,18 @@
 
   // pointerdown on a hand card: remember press state; the card's click
   // handler still owns tap selection. Only touches/pens can become drags.
+  // Tutorial (v1.2): hand drags open in the drag/place substeps only, from
+  // the scripted card, with no rules dialog covering the board.
   function beginDragPress(event, slotIndex) {
     if (!drag.enabled || event.pointerType === 'mouse') return;
-    if (tutorial.active) return; // drag disabled in tutorial (design A3)
-    if (!canPlay() || battleView.hidden || rulesDialog.open) return;
+    if (battleView.hidden || rulesDialog.open) return;
+    if (tutorial.active) {
+      const current = tutorialSubstep();
+      if (current !== 'drag' && current !== 'place') return;
+      if (slotIndex !== tutorialScriptedCard()) return;
+    } else if (!canPlay()) {
+      return;
+    }
     if (!game.players.player.hand[slotIndex]) return;
     drag.pointerId = event.pointerId;
     drag.slot = slotIndex;
@@ -1240,16 +1876,33 @@
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
       // Crossed the threshold: enter dragging and select the pressed card.
       drag.active = true;
-      selectCard(drag.slot);
-      const card = draggingCard();
-      if (!card) { cancelDrag(); return; }
-      card.classList.add('dragging');
-      const player = game.players.player;
-      const pressed = player.hand[drag.slot];
-      dragGhost.innerHTML = cardMarkup(pressed, drag.dragRotation, '');
-      dragGhost.hidden = false;
-      locked = null;
-      hovered = null;
+      if (drag.board) {
+        enterBoardDrag();
+      } else {
+        if (tutorial.active) {
+          // The scripted card is already selected in the drag/place substep;
+          // never re-route through selectCard (it would trip the substep).
+          const card = draggingCard();
+          if (!card) { cancelDrag(); return; }
+          card.classList.add('dragging');
+          const pressed = game.players.player.hand[drag.slot];
+          dragGhost.innerHTML = cardMarkup(pressed, drag.dragRotation, '');
+          dragGhost.hidden = false;
+          locked = null;
+          hovered = null;
+        } else {
+          selectCard(drag.slot);
+          const card = draggingCard();
+          if (!card) { cancelDrag(); return; }
+          card.classList.add('dragging');
+          const player = game.players.player;
+          const pressed = player.hand[drag.slot];
+          dragGhost.innerHTML = cardMarkup(pressed, drag.dragRotation, '');
+          dragGhost.hidden = false;
+          locked = null;
+          hovered = null;
+        }
+      }
     }
     event.preventDefault();
     drag.lastX = event.clientX;
@@ -1267,6 +1920,21 @@
     });
   }
 
+  // Board drag start: drop the locked anchor and re-anchor the shared ghost
+  // to the current card shape; the preview then follows via hovered.
+  function enterBoardDrag() {
+    const card = game.players.player.hand[slot];
+    if (!card) { cancelBoardDragPress(); return; }
+    dragGhost.innerHTML = cardMarkup(card, rotation, '');
+    dragGhost.hidden = false;
+    setBoardDragTouchAction(true);
+    locked = null;
+    hovered = null;
+    renderPreview();
+    moveGhost(drag.startX, drag.startY);
+  }
+  // (end of board re-drag section)
+
   function endDragCommon() {
     window.removeEventListener('pointermove', onDragMove);
     window.removeEventListener('pointerup', onDragEnd);
@@ -1278,20 +1946,55 @@
     dragGhost.hidden = true;
     const card = draggingCard();
     if (card) card.classList.remove('dragging');
+    if (drag.board) setBoardDragTouchAction(false);
     drag.pointerId = null;
     drag.slot = null;
+    drag.board = false;
+    drag.active = false;
+  }
+
+  // Board drag cancel: bring back the locked anchor and its preview.
+  function restoreBoardDrag() {
+    locked = drag.boardPrevLocked;
+    hovered = null;
+    renderPreview();
+  }
+
+  // Press never became a drag: clean listeners, keep locked intact.
+  function cancelBoardDragPress() {
+    window.removeEventListener('pointermove', onDragMove);
+    window.removeEventListener('pointerup', onDragEnd);
+    window.removeEventListener('pointercancel', onDragCancel);
+    drag.pointerId = null;
+    drag.board = false;
     drag.active = false;
   }
 
   function onDragEnd(event) {
     if (event.pointerId !== drag.pointerId) return;
     const wasActive = drag.active;
+    const wasBoard = drag.board; // endDragCommon resets the flags
     endDragCommon();
     if (!wasActive) return; // plain tap: card's click handler proceeds
     // Swallow the click that follows a real drag so it can't re-select.
     drag.pendingClick = true;
     setTimeout(() => { drag.pendingClick = false; }, 0);
     const target = targetFromPoint(event.clientX, event.clientY - DRAG_LIFT_PX);
+    if (wasBoard) {
+      if (target) {
+        setTarget(target);
+      } else {
+        restoreBoardDrag();
+      }
+      return;
+    }
+    if (tutorial.active) {
+      // Tutorial hand drag: only the scripted cell locks; wrong cells and
+      // off-board drops stay in the drag substep with a hint (design §4).
+      if (target) setTutorialDragTarget(target);
+      else tutorialHint(`松手要落在高亮格 ${positionName(tutorialTarget())}。`);
+      return;
+    }
     if (target) {
       setTarget(target);
     } else {
@@ -1303,10 +2006,20 @@
   function onDragCancel(event) {
     if (event.pointerId !== drag.pointerId) return;
     const wasActive = drag.active;
+    const wasBoard = drag.board; // endDragCommon resets the flags
     endDragCommon();
     if (!wasActive) return;
     drag.pendingClick = true;
     setTimeout(() => { drag.pendingClick = false; }, 0);
+    if (wasBoard) {
+      restoreBoardDrag();
+      return;
+    }
+    if (tutorial.active) {
+      // Interrupted tutorial drag: stay in the substep with a hint.
+      tutorialHint(`按住卡牌拖到高亮格 ${positionName(tutorialTarget())}。`);
+      return;
+    }
     restoreDragSnapshot();
   }
 
@@ -1327,27 +2040,57 @@
 
   function cancelDrag() {
     if (drag.pointerId === null) return;
+    const wasBoard = drag.board; // endDragCommon resets the flags
     endDragCommon();
+    if (wasBoard) {
+      restoreBoardDrag();
+      return;
+    }
+    if (tutorial.active) {
+      // Interrupted tutorial drag: stay in the substep, never restore a
+      // snapshot that could unlock the scripted state.
+      tutorialHint(`按住卡牌拖到高亮格 ${positionName(tutorialTarget())}。`);
+      return;
+    }
     restoreDragSnapshot();
   }
 
-  function setTarget(target) {
+  // Tutorial drag drop: wrong cell → hint, stay in the substep, never lock;
+  // scripted cell → lock and advance (drag→rotate/confirm, place→confirm).
+  function setTutorialDragTarget(target) {
+    const scripted = tutorial.step.player;
+    const onTarget = target.x === scripted.x && target.y === scripted.y;
+    if (!onTarget) {
+      hovered = null;
+      renderPreview();
+      tutorialHint(`要落到高亮格 ${positionName(tutorialTarget())}。`);
+      return;
+    }
     locked = target;
     hovered = null;
     board.focus({ preventScroll: true });
-    if (tutorial.active && tutorial.phase === 'place') {
-      const scripted = tutorial.step.player;
-      const onTarget = locked.x === scripted.x && locked.y === scripted.y;
-      renderPreview();
-      tutorialRenderStatus(onTarget
-        ? `${positionName(locked)} · 可以确认`
-        : tutorial.step.hint.target, onTarget ? 'valid' : 'invalid');
+    advanceTutorialSubstep(tutorialSubstep() === 'drag'
+      ? (tutorial.step.id === '01' ? 'rotate' : 'confirm')
+      : 'confirm');
+  }
+
+  function setTarget(target) {
+    if (tutorial.active) {
+      // Board input only fires in drag/place substeps (canPlay gate), but a
+      // trailing click or stray pointer can still land here: wrong cell gets
+      // a hint and never locks the anchor.
+      if (tutorial.phase !== 'place' || revealTimer !== null) return;
+      setTutorialDragTarget(target);
       return;
     }
+    locked = target;
+    hovered = null;
+    board.focus({ preventScroll: true });
     renderPreview();
   }
 
   board.addEventListener('pointermove', (event) => {
+    if (tutorial.active) return; // tutorial: no mouse hover preview
     if (!canPlay() || locked || event.pointerType === 'touch') return;
     const target = pointFromEvent(event);
     if (!target || (target.x === hovered?.x && target.y === hovered?.y)) return;
@@ -1360,9 +2103,49 @@
     renderPreview();
   });
   board.addEventListener('click', (event) => {
+    // A board drag that just released dispatches a trailing click; its hit
+    // tile is under the finger, not the lifted ghost, so it would move the
+    // anchor set by onDragEnd. Swallow it like the hand-card click does.
+    if (drag.pendingClick) {
+      event.preventDefault();
+      return;
+    }
     const target = pointFromEvent(event);
     if (target && canPlay()) setTarget(target);
   });
+
+  // =====================================================================
+  // Board re-drag of a locked preview (v1.2 B, touch/pen only). The hand
+  // drag owns placement; this path only moves the already-locked anchor
+  // between tiles. Mouse keeps plain click/hover.
+  // =====================================================================
+
+  function beginBoardDragPress(event) {
+    if (!drag.enabled || event.pointerType === 'mouse') return;
+    if (tutorial.active) return; // board re-drag stays formal-only (v1.2 §2)
+    if (!locked || !canPlay() || battleView.hidden || rulesDialog.open) return;
+    // Anchor press only: a locked-preview tile or the outlined target tile.
+    const tile = event.target.closest('[data-cell]');
+    if (!tile || !(tile.classList.contains('preview') || tile.hasAttribute('data-target'))) return;
+    drag.pointerId = event.pointerId;
+    drag.board = true;
+    drag.startX = event.clientX;
+    drag.startY = event.clientY;
+    drag.active = false;
+    drag.boardPrevLocked = locked;
+    drag.dragRotation = rotation;
+    window.addEventListener('pointermove', onDragMove);
+    window.addEventListener('pointerup', onDragEnd);
+    window.addEventListener('pointercancel', onDragCancel);
+  }
+
+  board.addEventListener('pointerdown', beginBoardDragPress);
+
+  // Keep page scroll from stealing touch drags that start on the board's
+  // locked preview; restored when the drag ends.
+  function setBoardDragTouchAction(on) {
+    board.style.touchAction = on ? 'none' : '';
+  }
 
   const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
   window.addEventListener('blur', () => {
@@ -1370,36 +2153,50 @@
   });
 
   window.addEventListener('keydown', (event) => {
-    if (battleView.hidden || !canPlay() || rulesDialog.open || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (battleView.hidden || rulesDialog.open || event.ctrlKey || event.metaKey || event.altKey) return;
     if (tutorial.active) {
       const key = event.key.toLowerCase();
-      if (/^[1-4]$/.test(key)) {
-        const index = Number(key) - 1;
-        if (index === tutorialScriptedCard()) selectCard(index);
-        else tutorialHint(tutorial.step.hint.card);
-      } else if (key === 'r') {
-        rotateCard(event.shiftKey ? -1 : 1);
-      } else if (key === 'e') {
-        event.preventDefault();
-        if (!event.repeat) toggleSpecial();
-      } else if (arrows[event.key]) {
-        event.preventDefault();
-        const scripted = tutorial.step.player;
-        const target = locked ?? { x: scripted.x, y: scripted.y };
-        const x = target.x + arrows[event.key][0];
-        const y = target.y + arrows[event.key][1];
-        if (rules.inBounds(x, y)) setTarget({ x, y });
-      } else if (key === 'enter') {
-        if (tutorial.phase === 'place' && !submitButton.disabled && tutorialNextButton.hidden) {
+      const current = tutorialSubstep();
+      // Enter works in confirm (submit) and explain (next) regardless of
+      // the canPlay substep gate.
+      if (key === 'enter') {
+        if (tutorial.phase === 'place' && current === 'confirm'
+          && !submitButton.hidden && !submitButton.disabled && tutorialNextButton.hidden) {
           event.preventDefault();
           tutorialConfirm();
-        } else if (tutorial.phase === 'explain' && !tutorialNextButton.disabled) {
+        } else if (tutorial.phase === 'explain' && !tutorialNextButton.hidden && !tutorialNextButton.disabled) {
           event.preventDefault();
           tutorialNext();
         }
+        return;
+      }
+      if (tutorial.phase !== 'place' || revealTimer !== null) return;
+      if (/^[1-4]$/.test(key)) {
+        const index = Number(key) - 1;
+        if (current === 'select') {
+          if (index === tutorialScriptedCard()) selectCard(index);
+          else tutorialHint(tutorial.step.hint.card);
+        }
+      } else if (key === 'r') {
+        if (current === 'rotate') rotateCard(event.shiftKey ? -1 : 1);
+      } else if (key === 'e') {
+        event.preventDefault();
+        if (!event.repeat && current === 'special') toggleSpecial();
+      } else if (arrows[event.key] && tutorialBoardSubstep()) {
+        event.preventDefault();
+        const scripted = tutorial.step.player;
+        // Arrow moves walk from the last tried cell (or the scripted anchor
+        // on the first press), so a move away and back can reach the
+        // scripted cell by keyboard alone (acceptance: 键盘可完成第 1 步).
+        const base = locked ?? tutorial.arrowBase ?? { x: scripted.x, y: scripted.y };
+        const x = base.x + arrows[event.key][0];
+        const y = base.y + arrows[event.key][1];
+        if (rules.inBounds(x, y)) setTarget({ x, y });
+        if (!locked) tutorial.arrowBase = { x, y };
       }
       return;
     }
+    if (!canPlay()) return;
     const key = event.key.toLowerCase();
     const step = arrows[event.key];
     if (/^[1-4]$/.test(key)) {
