@@ -25,6 +25,9 @@
   const rulesDialog = byId('rules-dialog');
   const resultDialog = byId('result-dialog');
   const mulliganDialog = byId('mulligan-dialog');
+  // Deck viewer (v1.3.3): count-as-button entry plus the peek dialog.
+  const deckPeekButton = byId('deck-peek');
+  const deckPeekDialog = byId('deck-peek-dialog');
   const mulliganKeepButton = byId('mulligan-keep');
   const mulliganRedrawButton = byId('mulligan-redraw');
   const rulesTutorialButton = byId('rules-tutorial');
@@ -287,7 +290,39 @@
   // Cleared in startGame (restart) and showResult (dialog never after end);
   // maybePromptMulligan itself re-checks round/finished/hidden state so a
   // stale timer can never pop the dialog mid-turn or on a dead view.
+  // v1.3.3: the 700ms clock starts only after the deal's first rendered
+  // frame (double rAF) — slow phones painted the board later than the old
+  // setTimeout, so the dialog covered the whole deal animation. Both the
+  // pending rAF and the timer are torn down together everywhere.
   let mulliganPromptTimer = null;
+  let mulliganPromptRaf = null;
+
+  function clearMulliganPromptArming() {
+    if (mulliganPromptRaf !== null) {
+      cancelAnimationFrame(mulliganPromptRaf);
+      mulliganPromptRaf = null;
+    }
+    if (mulliganPromptTimer !== null) {
+      clearTimeout(mulliganPromptTimer);
+      mulliganPromptTimer = null;
+    }
+  }
+
+  // Arm the deal->prompt chain. Reduced motion skips the rAF wait entirely:
+  // there is no deal to watch, so the prompt stays near-instant (0ms).
+  function armMulliganPrompt() {
+    clearMulliganPromptArming();
+    if (!motionEnabled()) {
+      mulliganPromptTimer = setTimeout(maybePromptMulligan, 0);
+      return;
+    }
+    mulliganPromptRaf = requestAnimationFrame(() => {
+      mulliganPromptRaf = requestAnimationFrame(() => {
+        mulliganPromptRaf = null;
+        mulliganPromptTimer = setTimeout(maybePromptMulligan, 700);
+      });
+    });
+  }
 
   function showBattle() {
     setupView.hidden = true;
@@ -308,11 +343,9 @@
     hideActionToast();
     if (resultDialog.open) resultDialog.close();
     closeMulliganDialog();
-    // No stale deal->prompt timer may pop the dialog over the setup view.
-    if (mulliganPromptTimer !== null) {
-      clearTimeout(mulliganPromptTimer);
-      mulliganPromptTimer = null;
-    }
+    closeDeckPeek();
+    // No stale deal->prompt arming may pop the dialog over the setup view.
+    clearMulliganPromptArming();
     resetSetupTutorialConfirm();
     battleView.hidden = true;
     setupButton.hidden = true;
@@ -448,10 +481,8 @@
     resultPending = false;
     if (resultDialog.open) resultDialog.close();
     closeMulliganDialog();
-    if (mulliganPromptTimer !== null) {
-      clearTimeout(mulliganPromptTimer);
-      mulliganPromptTimer = null;
-    }
+    closeDeckPeek();
+    clearMulliganPromptArming();
     if (rulesDialog.open) rulesDialog.close();
     resetRulesTutorialConfirm();
     resetSetupTutorialConfirm();
@@ -1081,22 +1112,24 @@
     }
     hideActionToast();
     closeMulliganDialog();
+    closeDeckPeek(); // no peek dialog may survive a fresh match
     mulliganPrompted = false;
     const random = trial ? seededRandom(trial.seed) : Math.random;
     const next = rules.createGame(random, config);
     clearTimeout(revealTimer);
     revealTimer = null;
-    // Restarting a match disarms any pending deal->prompt timer from the
-    // previous game (v1.3.1); startGame re-arms its own below.
-    if (mulliganPromptTimer !== null) {
-      clearTimeout(mulliganPromptTimer);
-      mulliganPromptTimer = null;
-    }
+    // Restarting a match disarms any pending deal->prompt arming from the
+    // previous game (v1.3.1/v1.3.3); startGame re-arms its own below.
+    clearMulliganPromptArming();
     resultPending = false;
     if (resultDialog.open) resultDialog.close();
     game = next;
     activeConfig = config;
     matchRandom = random;
+    // Deck viewer (v1.3.3): snapshot the full opening deck (hand + pile = 15)
+    // so the peek dialog can always show all of it, even after cards leave
+    // the pile via draws/mulligan/discard. Rules engine untouched.
+    game.playerDeck = [...next.players.player.hand, ...next.players.player.pile];
     // CPU takes its one-time opening mulligan before the first chooseCpuMove
     // so its planning already reflects any swap (engine decides, no undo).
     if (!trial && rules.shouldCpuMulligan(game)) rules.mulligan(game, 'cpu');
@@ -1120,13 +1153,12 @@
     clearMotion(); // a fresh formal game starts its own motion cleanly
     playMotionOnce(battleView, 'view-enter', 320);
     // v1.3.1: the opening deal plays first and the mulligan prompt waits for
-    // it (~700ms deal; reduced motion gets a near-instant prompt). Redraw
-    // replays the deal itself; keep just closes the dialog (no second deal).
+    // it. v1.3.3: the 700ms clock starts after the deal's first rendered
+    // frame (double rAF) so slow phones always show the dealing animation;
+    // reduced motion still prompts near-instantly.
     playOpeningMotion();
-    clearTimeout(mulliganPromptTimer);
-    mulliganPromptTimer = null;
     if (promptMulligan) {
-      mulliganPromptTimer = setTimeout(maybePromptMulligan, motionEnabled() ? 700 : 0);
+      armMulliganPrompt();
     }
   }
 
@@ -1242,6 +1274,10 @@
       return;
     }
     byId('deck-count').textContent = player.pile.length;
+    // Deck viewer (v1.3.3): keep the accessible name in sync with the count
+    // ("查看牌库，剩余 X 张"); the visible compact text is untouched.
+    deckPeekButton.setAttribute('aria-label', `查看牌库，剩余 ${player.pile.length} 张`);
+    deckPeekButton.title = '查看本局牌库';
     let dimmed = false;
 
     for (const [index, button] of cards.entries()) {
@@ -1284,6 +1320,54 @@
     const pose = card.rotations[turn];
     return `<span class="ghost-shape" style="--ghost-cols:${pose.width};--ghost-rows:${pose.height}" aria-hidden="true">${shapeCells(pose)}</span>`;
   }
+
+  // =====================================================================
+  // Deck viewer (v1.3.3): a read-only look at this match's full 15-card
+  // deck. Cards still in player.pile are "remaining" (normal face); every
+  // other card of the opening deck — current hand, discards, already-played
+  // — is "drawn" (greyed + overlay). playerDeck is a startGame snapshot of
+  // the opening deck, so a mulligan swap can never lose the old hand cards:
+  // they flip back to "remaining" the moment they return to the pile.
+  // =====================================================================
+
+  // Render the peek dialog body. Safe no-op without a formal game (the
+  // tutorial hides .hand-deck entirely, so its button can't be reached).
+  function renderDeckPeek() {
+    if (!game || trial || tutorial.active) return;
+    const player = game.players.player;
+    // Identity matching against live card objects: a mulligan returns an old
+    // hand card to the pile and it counts as remaining again.
+    const remaining = game.playerDeck.filter((card) => player.pile.includes(card));
+    const drawn = game.playerDeck.filter((card) => !player.pile.includes(card));
+    byId('deck-peek-summary').textContent =
+      `剩余 ${remaining.length} 张 · 已抽到 ${drawn.length} 张`;
+    byId('deck-peek-grid').innerHTML = [...remaining, ...drawn]
+      .map((card) => {
+        const inPile = player.pile.includes(card);
+        const marker = inPile ? '' : '<span class="deck-peek-mark" aria-hidden="true">已抽到</span>';
+        return `<div class="deck-peek-card${inPile ? '' : ' drawn'}">${cardMarkup(card, 0, marker)}</div>`;
+      })
+      .join('');
+  }
+
+  function openDeckPeek() {
+    if (trial || tutorial.active || !game || deckPeekDialog.open) return;
+    renderDeckPeek();
+    deckPeekDialog.showModal();
+  }
+
+  function closeDeckPeek() {
+    if (deckPeekDialog.open) deckPeekDialog.close();
+  }
+
+  deckPeekButton.addEventListener('click', openDeckPeek);
+
+  // One cleanup sweep for every close path (Esc cancel, form-method ×,
+  // programmatic close): the rendered snapshot goes stale the moment the
+  // match advances, so the grid is emptied instead of kept around.
+  deckPeekDialog.addEventListener('close', () => {
+    byId('deck-peek-grid').replaceChildren();
+  });
 
   // Ghost geometry follows the live board: cell size and gap are measured
   // from #board each time a drag starts, so the footprint is the same size
@@ -1710,10 +1794,7 @@
   // =====================================================================
 
   function maybePromptMulligan() {
-    if (mulliganPromptTimer !== null) {
-      clearTimeout(mulliganPromptTimer);
-      mulliganPromptTimer = null;
-    }
+    clearMulliganPromptArming();
     if (mulliganPrompted) return false;
     if (trial || tutorial.active) return false;
     // Delayed-fire guards: the game/view must still be live round 1 with the
@@ -1799,11 +1880,9 @@
     if (tutorial.active) return; // tutorial ending never opens the dialog
     clearMotion(); // result dialog: no dealing/shuffling residue behind it
     closeMulliganDialog();
-    // The deal->prompt timer must never fire into a finished match.
-    if (mulliganPromptTimer !== null) {
-      clearTimeout(mulliganPromptTimer);
-      mulliganPromptTimer = null;
-    }
+    closeDeckPeek();
+    // The deal->prompt arming must never fire into a finished match.
+    clearMulliganPromptArming();
     const counts = rules.score(game.board);
     const won = counts.player > counts.cpu;
     const unlocked = won && !trial ? setup.awardVictory() : [];
@@ -1859,8 +1938,17 @@
     return tile ? boardPosition(Number(tile.dataset.cell)) : null;
   }
 
+  // Hand drags lift the ghost above the finger so it stays visible under it;
+  // board re-drag keeps zero lift — the finger sits on the tile it means to
+  // grab, so a lifted hit-test would read a cell one row above (v1.3.3).
   const DRAG_THRESHOLD_PX = 8;
   const DRAG_LIFT_PX = 56;
+  const BOARD_DRAG_LIFT_PX = 0;
+
+  // Lift that applies to this drag's hit-tests and ghost positioning.
+  function dragLiftPx() {
+    return drag.board ? BOARD_DRAG_LIFT_PX : DRAG_LIFT_PX;
+  }
 
   // pointerdown on a hand card: remember press state; the card's click
   // handler still owns tap selection. Only touches/pens can become drags.
@@ -1916,7 +2004,7 @@
 
   function moveGhost(clientX, clientY) {
     dragGhost.style.left = `${clientX}px`;
-    dragGhost.style.top = `${clientY - DRAG_LIFT_PX}px`;
+    dragGhost.style.top = `${clientY - dragLiftPx()}px`;
   }
 
   function onDragMove(event) {
@@ -1964,7 +2052,7 @@
     drag.frame = requestAnimationFrame(() => {
       drag.frame = null;
       moveGhost(drag.lastX, drag.lastY);
-      const target = targetFromPoint(drag.lastX, drag.lastY - DRAG_LIFT_PX);
+      const target = targetFromPoint(drag.lastX, drag.lastY - dragLiftPx());
       // v1.3.1: over the board the ghost hides so the real target tile shows
       // through (.tile.preview carries the shape); off-board the footprint
       // ghost follows the finger.
@@ -2039,7 +2127,7 @@
     // Swallow the click that follows a real drag so it can't re-select.
     drag.pendingClick = true;
     setTimeout(() => { drag.pendingClick = false; }, 0);
-    const target = targetFromPoint(event.clientX, event.clientY - DRAG_LIFT_PX);
+    const target = targetFromPoint(event.clientX, event.clientY - (wasBoard ? BOARD_DRAG_LIFT_PX : DRAG_LIFT_PX));
     if (wasBoard) {
       if (target) {
         setTarget(target);
@@ -2213,7 +2301,10 @@
   });
 
   window.addEventListener('keydown', (event) => {
-    if (battleView.hidden || rulesDialog.open || event.ctrlKey || event.metaKey || event.altKey) return;
+    // Deck peek (v1.3.3): a modal dialog must not let hotkeys steer the
+    // match behind it (same reasoning as the rulesDialog guard below).
+    if (battleView.hidden || rulesDialog.open || deckPeekDialog.open
+      || event.ctrlKey || event.metaKey || event.altKey) return;
     if (tutorial.active) {
       const key = event.key.toLowerCase();
       const current = tutorialSubstep();
@@ -2312,6 +2403,7 @@
     byId('rule-rewards').hidden = true;
     byId('result-setup').hidden = true;
     rulesTutorialButton.hidden = true; // no tutorial in trial mode
+    deckPeekButton.hidden = true; // no deck peek in trial (openDeckPeek guards too)
     replayButton.classList.replace('quiet', 'primary');
     trialReplay.addEventListener('click', () => startGame(activeConfig));
     startGame({ mapId: 'bridge', difficultyId: 'standard', bridgeOrigins: trial.bridgeOrigins });

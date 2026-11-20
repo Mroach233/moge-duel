@@ -755,6 +755,113 @@ kbd { padding: 2px 4px; border-radius: 4px; border: 1px solid #4b5c67; color: #c
 .dialog h2 { font-size: 24px; }
 .icon-button { min-width: 36px; padding: 0 8px; font-size: 22px; }
 
+/* ======================================================================
+   Deck viewer (v1.3.3): the hand-heading deck count doubles as the entry
+   button, so the layout cost of the feature is zero — same box, same icon,
+   same text. The button resets the .button chrome and keeps the .deck-count
+   look; the dialog reuses the deck-editor's card shell (.card/.catalog-card
+   sizing) with a .drawn state for drawn/used cards.
+   ====================================================================== */
+button.deck-count {
+  padding: 3px 8px;
+  border: 1px solid #4a6070;
+  border-radius: 7px;
+  background: #1d2a34;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 120ms, border-color 120ms;
+}
+button.deck-count:hover:not(:disabled) { background: #263542; border-color: #6b8292; }
+button.deck-count:active { transform: translateY(1px); }
+/* Affordance suffix: a compact 查看 › that reads as "this opens something".
+   aria-hidden — the accessible name already carries the full description. */
+.deck-peek-hint {
+  margin-left: 3px;
+  padding-left: 6px;
+  border-left: 1px solid #3a4b57;
+  color: #a8bfca;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+button.deck-count:hover .deck-peek-hint { color: #d3e7ee; }
+/* Hide the native UA button chrome without losing form semantics. */
+button.deck-count { -webkit-appearance: none; appearance: none; }
+.deck-peek-dialog { width: min(560px, calc(100% - 26px)); }
+.deck-peek-dialog[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 13px;
+  overflow: hidden;
+}
+.deck-peek-summary { color: var(--muted); font-size: 13px; }
+.deck-peek-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-content: start;
+  gap: 8px;
+  padding: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* Catalog-card shell (备战页卡库): same grid rows/height as .card but sized
+   for 5 columns; .card stays untouched so the hand never inherits this. */
+.deck-peek-card {
+  --chip: 10px;
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 5px;
+  height: 105px;
+  padding: 9px 10px;
+  border: 1px solid #40515e;
+  border-radius: 9px;
+  background: linear-gradient(140deg, #2c3b47, #25333e);
+  text-align: left;
+  pointer-events: none; /* read-only: cardMarkup's markup only, no focus */
+}
+.deck-peek-card .long-shape { --chip: 8px; }
+/* Drawn/used: half-transparent + greyed, looks consumed. The overlay mark
+   anchors to the card like the catalog lock tag does. */
+.deck-peek-card.drawn {
+  opacity: 0.45;
+  filter: grayscale(0.85) saturate(0.4);
+  border-color: #2b3a44;
+}
+.deck-peek-mark {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 4px;
+  border: 1px solid #465058;
+  border-radius: 4px;
+  color: #c3d0d6;
+  background: #232d34;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+/* Short viewports: the dialog already scrolls internally; 4 columns keep
+   rows from overflowing the (100dvh - 20px) max-height budget. */
+@media (max-height: 760px) {
+  .deck-peek-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 460px) {
+  .deck-peek-dialog { width: calc(100% - 20px); }
+  .deck-peek-dialog[open] { padding: 13px; }
+  .deck-peek-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+  .deck-peek-card { --chip: 7px; height: 86px; gap: 3px; padding: 6px; }
+  .deck-peek-card .long-shape { --chip: 6px; }
+  .deck-peek-card .card-name { font-size: 11px; }
+  .deck-peek-card .card-cost { font-size: 11px; }
+  .deck-peek-card .card-size { font-size: 17px; }
+}
+@media (max-width: 350px) {
+  .deck-peek-card { --chip: 6px; height: 74px; gap: 2px; }
+  .deck-peek-card .card-name { font-size: 10px; }
+  .deck-peek-card .card-cost { font-size: 9.5px; }
+  .deck-peek-card .card-size { font-size: 13px; }
+}
+
 /* Opening mulligan prompt (v1.2): a compact two-button dialog; it inherits
    .dialog sizing, so it never overflows at 320/390. */
 .mulligan-dialog h2 { font-size: 20px; line-height: 1.4; }
@@ -1094,6 +1201,7 @@ kbd { padding: 2px 4px; border-radius: 4px; border: 1px solid #4b5c67; color: #c
   .hand-panel { padding: 7px 9px 6px; }
   .hand-panel .panel-heading { margin-bottom: 4px; row-gap: 2px; }
   .deck-count { font-size: 10px; }
+  .deck-peek-hint { margin-left: 2px; padding-left: 4px; font-size: 9px; }
   .next-draw { font-size: 10px; }
   .card { --chip: 6px; height: 64px; gap: 1px; padding: 4px 5px; }
   .card-size { font-size: 13px; }
@@ -1114,6 +1222,25 @@ kbd { padding: 2px 4px; border-radius: 4px; border: 1px solid #4b5c67; color: #c
   .arena { width: min(100%, 430px); }
   .board-legend { margin: 8px 0; }
   .action-bar { margin-top: 10px; }
+}
+
+/* --- Tablet portrait / split-screen tier (v1.3.3) -----------------------
+   461-760 wide with the stacked playfield (max-width:760 layout) but taller
+   than the phone tiers (761+): the base .arena caps at 500px, which a
+   576x822 board-panel cannot hold — the board overflows onto the row
+   labels, legend and log. Cap the arena by height band so the 13x11 board
+   (arena width - 22px label column, 11/13 aspect) always fits the panel.
+   Phones (<=460 wide) and the >=761 desktop layout never match these. */
+@media (min-width: 461px) and (max-width: 760px) and (min-height: 761px) and (max-height: 860px) {
+  .arena { width: min(100%, 235px); }
+}
+
+@media (min-width: 461px) and (max-width: 760px) and (min-height: 861px) and (max-height: 960px) {
+  .arena { width: min(100%, 300px); }
+}
+
+@media (min-width: 461px) and (max-width: 760px) and (min-height: 961px) {
+  .arena { width: min(100%, 380px); }
 }
 
 /* ======================================================================

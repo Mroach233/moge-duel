@@ -142,7 +142,11 @@
           <h2 id="hand-title">手牌</h2>
           <button class="button quiet mulligan" id="mulligan" type="button" hidden>换一手 · 每局 1 次</button>
           <div class="hand-deck">
-            <span class="deck-count">牌库剩 <strong id="deck-count">11</strong> 张</span>
+            <!-- v1.3.3 deck viewer: the count itself opens the peek dialog.
+                 Accessible name (with the live remaining count) is set from
+                 renderHand; visible text stays compact, the 「查看 ›」 suffix
+                 is the button affordance. -->
+            <button class="deck-count" id="deck-peek" type="button" aria-haspopup="dialog">牌库剩 <strong id="deck-count">11</strong> 张<span class="deck-peek-hint" aria-hidden="true">查看 ›</span></button>
             <div class="next-draw" id="next-draw" hidden>
               <span class="next-draw-label">下张补牌</span>
               <span class="mini-shape" id="next-draw-shape" aria-hidden="true"></span>
@@ -205,6 +209,20 @@
         <button class="button primary" id="save-deck" type="button">使用此牌组</button>
       </div>
     </div>
+  </dialog>
+
+  <!-- v1.3.3 deck viewer: read-only look at this match's full 15-card deck.
+       Remaining cards render normally, drawn/used ones greyed via .drawn.
+       Content is rendered on each open from game.playerDeck + player.pile. -->
+  <dialog id="deck-peek-dialog" class="dialog deck-peek-dialog" aria-labelledby="deck-peek-title" aria-describedby="deck-peek-summary">
+    <div class="dialog-header">
+      <div>
+        <h2 id="deck-peek-title">牌库</h2>
+        <p id="deck-peek-summary" class="selection-note"></p>
+      </div>
+      <form method="dialog"><button class="button icon-button" aria-label="关闭牌库查看" type="submit">×</button></form>
+    </div>
+    <div class="deck-peek-grid" id="deck-peek-grid" role="group" aria-label="本局牌组"></div>
   </dialog>
 
   <dialog id="result-dialog" class="dialog result-dialog" aria-labelledby="result-title">
