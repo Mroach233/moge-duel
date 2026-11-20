@@ -908,9 +908,10 @@
     const push = (element) => {
       targets.push({ element, expand: 6 });
     };
-    if (current === 'select' || current === 'drag') {
-      push(cards[tutorial.step.player.slot]);
-    }
+    // Scripted card: a mask target in every place substep (design §3), so
+    // rotate/special/confirm keep it lit too instead of dimming under the
+    // shade. Pushed once here; the per-substep pushes below never re-add it.
+    push(cards[tutorialScriptedCard()]);
     // Target tile: drag/place/confirm always; rotate only when it should be
     // lit (01 after the anchor locked, 02 from the start — design §2).
     const showAnchorTile = current === 'drag' || current === 'place' || current === 'confirm'

@@ -1173,6 +1173,15 @@ body.tutorial-mode .card.tutorial-script {
   border-color: var(--gold);
   box-shadow: 0 0 0 1px #f9d38c40, inset 0 0 12px #f9d38c1f;
 }
+/* The scripted card must stay at full brightness in every place substep,
+   including rotate/special/confirm where the whole hand is disabled:
+   .card:disabled (0.63) and .tutorial-locked must never dim it — the mask
+   hole + gold ring around it are the highlight (design §3, v1.3.2). */
+body.tutorial-mode .card.tutorial-script:disabled,
+body.tutorial-mode .card.tutorial-script.tutorial-locked {
+  opacity: 1;
+  filter: none;
+}
 /* Gold pulsing ring on the scripted anchor tile; outline only, so cell size
    never changes (no layout shift on the board). */
 body.tutorial-mode .tile.tutorial-target::before {
